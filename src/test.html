@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Full Screen Split Layout Example</title>
+  <style>
+    body, html {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+    }
+    #app {
+      display: flex;
+      height: 100vh;
+    }
+    .left-panel {
+      flex: 30%;
+      background-color: lightblue;
+    }
+    .right-panel {
+      flex: 70%;
+      background-color: lightgreen;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- 왼쪽 패널 -->
+    <div class="left-panel">
+      <h2>왼쪽 영역</h2>
+    </div>
+    <!-- 오른쪽 패널 -->
+    <div class="right-panel">
+      <h2>오른쪽 영역</h2>
+    </div>
+  </div>
+</body>
+</html>
