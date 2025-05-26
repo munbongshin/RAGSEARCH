@@ -1,5 +1,7 @@
 import sys
-sys.path.append('C:/Dev/vueprj2')  # 프로젝트 루트 경로 추가
+import os
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(project_root)
 from backend.app.PostgresDbManager import PostgresDbManager
 from backend.app.ChromaDbManager import ChromaDbManager
 from backend.app.RagChatApp import RAGChatApp
@@ -8,7 +10,6 @@ from backend.app.auth_session_service import SessionService
 from backend.app.auth_middleware import DatabasePool
 from backend.app.auth_service import AuthService
 
-import os
 from flask import Blueprint, Flask, request, Response, jsonify, make_response
 from flask_cors import CORS
 import logging, json
@@ -37,7 +38,7 @@ JWT_EXPIRATION_DELTA = timedelta(hours=9)
 
 # 로깅 설정
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.CRITICAL,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -55,7 +56,7 @@ def generate_token(user_id: int, username: str) -> str:
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm='HS256')
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.CRITICAL)
 # RAGChatApp.py 파일의 시작 부분에 다음 환경 변수 추가
 os.environ["LANGCHAIN_POSTHOG_DISABLED"] = "true"
 
@@ -70,7 +71,7 @@ app = Flask(__name__)
 
 CORS(app, resources={
     r"/api/*": {  
-        "origins": ["http://localhost:8081"],  # Single origin
+        "origins": "*",  # Allow all origins
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "supports_credentials": True
@@ -426,7 +427,7 @@ def get_groups():
         groups = auth_service.get_groups()  # groups 테이블에서 데이터 조회
         return jsonify({
             'success': True,
-            'message': '그룹 목록을 성공적으로 불러오는데 실패했습니다.',
+            'message': '그룹 목록을 성공적으로 불러옸습니다.',
             'groups': groups
         }), 200
     except Exception as e:
@@ -453,7 +454,6 @@ def get_group(group_id: int):
 # 새 그룹 생성
 @auth_bp.route('/groups/create', methods=['POST'])
 @require_auth
-@require_admin
 def create_group():
     try:
        data = request.get_json()
@@ -481,7 +481,6 @@ def create_group():
 # 그룹 정보 수정
 @auth_bp.route('/groups/update', methods=['POST'])
 @require_auth
-@require_admin
 def update_group():
    if request.method == 'POST':
         try:
@@ -507,7 +506,6 @@ def update_group():
 
 @auth_bp.route('/groups/delete', methods=['POST'])
 @require_auth
-@require_admin
 def delete_group():   # Remove parameter here
     try:
         group_id = request.json.get('group_id')
@@ -523,7 +521,6 @@ def delete_group():   # Remove parameter here
         
 @auth_bp.route('/users/grouplist', methods=['POST'])
 @require_auth
-@require_admin
 def get_user_groups():
     """사용자의 그룹 목록 조회"""
     try:
@@ -545,7 +542,6 @@ def get_user_groups():
         
 @auth_bp.route('/users/savegroups', methods=['POST'])
 @require_auth
-@require_admin
 def save_user_groups():
     """사용자의 그룹 목록 저장"""
     try:
@@ -573,7 +569,6 @@ def save_user_groups():
 
 @auth_bp.route('/users/assigngroup', methods=['POST'])
 @require_auth
-@require_admin
 def assign_group():
     try:
         """사용자에게 그룹 할당"""
@@ -596,7 +591,6 @@ def assign_group():
 
 @auth_bp.route('/users/deletegroup', methods=['DELETE'])  # 'methods' 오타
 @require_auth
-@require_admin
 def remove_group():
     try:
         """사용자의 그룹 할당 해제"""
@@ -621,7 +615,6 @@ def remove_group():
 
 @auth_bp.route('/groups/groupusers', methods=['POST'])
 @require_auth
-@require_admin
 def get_group_users():
     try:
         """그룹에 속한 사용자 목록 조회"""
@@ -638,7 +631,6 @@ def get_group_users():
 # Front-end의 요청 형식에 맞춘 새로운 API 엔드포인트
 @auth_bp.route('/permissionsave', methods=['POST'])
 @require_auth
-@require_admin
 def save_collection_permissions():
     try:
         data = request.json
@@ -890,11 +882,12 @@ def create_collection():
     try:
         data = request.json
         collection_name = data.get('name')
+        creator = data.get('creator')
         
         if not collection_name:
             return jsonify({"success": False, "message": "컬렉션 이름이 제공되지 않았습니다."}), 400
         
-        result = db_manager.create_collection(collection_name)
+        result = db_manager.create_collection(collection_name,creator)
         if result:
             logger.info(f"Successfully created collection: {collection_name}")
             return jsonify({"success": True, "message": result}), 201
@@ -1019,6 +1012,7 @@ def get_collections_auth():
         }), 500
 
 @app.route('/api/delete-collection', methods=['POST'])
+@require_auth
 def delete_collection():
     try:
         data = request.json
@@ -1035,6 +1029,7 @@ def delete_collection():
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/api/search-documents', methods=['GET'])
+@require_auth
 def search_documents():
     try:
         # 요청 파라미터 검증
@@ -1053,9 +1048,10 @@ def search_documents():
         # 검색 실행
         #results = db_manager.search_collection(        
         results = db_manager.search_keyword_collection(
-            collection_name=collection_name, 
+            collection_names=collection_name,  # 변수명 수정
             query=search_query,
-            n_results=limit
+            n_results=limit,
+            score_threshold=0.1
         )
 
         # 결과 가공
@@ -1063,7 +1059,7 @@ def search_documents():
         for result in results:
             try:
                 formatted_doc = {
-                    'content': result.get('content', ''),
+                    'content': result.get('page_content', ''),
                     'metadata': result.get('metadata', {}),
                     'score': result.get('score', 0),
                 }
@@ -1097,6 +1093,7 @@ def search_documents():
         }), 500
 
 @app.route('/api/view-collection', methods=['GET'])
+@require_auth
 def view_collection():
     try:
         collection_name = request.args.get('collection_name')
@@ -1111,6 +1108,7 @@ def view_collection():
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/api/check_file_exists', methods=['POST'])
+@require_auth
 def check_file_exists():
     try:
         data = request.json
@@ -1130,6 +1128,7 @@ def check_file_exists():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/upload_and_embed', methods=['POST'])
+@require_auth
 def upload_and_embed():
     try:
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1175,6 +1174,7 @@ def upload_and_embed():
 
 
 @app.route('/api/get-all-documents-source', methods=['GET'])
+@require_auth
 def get_all_documents_source():
     try:
         # 디버깅을 위한 로깅
@@ -1241,6 +1241,7 @@ def get_all_documents_source():
         }), 500
 
 @app.route('/api/process_query', methods=['POST'])
+@require_auth
 def process_query():
     try:
         data = request.json
@@ -1253,6 +1254,7 @@ def process_query():
         select_sources = data.get('select_sources', [])
         rag_mode = data.get('ragmode')
         score_threshold= data.get('score_threshold')
+        system_message = data.get('system_message')
 
         # 필수 파라미터 체크 전 값 확인
         # 파라미터 검증 및 로깅 강화
@@ -1267,8 +1269,8 @@ def process_query():
             return jsonify({'error': f'Missing required parameters: {", ".join(missing)}'}), 400
             
         # 선택된 system message를 반영
-        rag_app.set_system_message(message_manager.get_selected_system_message(message_manager.get_current_selected_message_name()))
-        
+        rag_app.set_system_message(system_message)
+        logger.debug(f"System_message: {system_message}")  # 전체 요청 데이터 로깅
         # select_sources 처리 - 컬렉션별 소스 필터링은 perform_search 내부에서 처리
         logger.info(f"Processing query across collections: {collection_names} with sources: {'all' if not select_sources else select_sources}")
         
@@ -1326,6 +1328,7 @@ def process_query():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/summarize-selectdocs', methods=['POST'])
+@require_auth
 def summarize_selectdocs():
     try:
         # 상세 로깅 추가
@@ -1416,6 +1419,7 @@ def summarize_selectdocs():
         }), 500
 
 @app.route('/api/summarize-sources', methods=['POST'])
+@require_auth
 def summarize_sources():
     try:
         data = request.json
@@ -1445,6 +1449,7 @@ def summarize_sources():
         return jsonify({"success": False, "error": error_msg}), 500
 
 @app.route('/api/summarize-sse', methods=['GET'])
+@require_auth
 def summarize_sse():
     try:
         collections = json.loads(request.args.get('collections', '[]'))
@@ -1512,6 +1517,7 @@ def summarize_sse():
     
 # 요약을 원하는 문서의 페이지정보를 제공하는 API
 @app.route('/api/get-document-pages', methods=['GET', 'POST'])
+@require_auth
 def get_document_pages():
     try:
         # GET 또는 POST 메서드에 따라 파라미터 추출
@@ -1563,6 +1569,7 @@ def get_document_pages():
 
 # 요약을 원하는 문서의 페이지만 요약하는 API
 @app.route('/api/page-content', methods=['POST'])
+@require_auth
 def page_content():
     try:
         data = request.get_json()
@@ -1594,6 +1601,7 @@ def page_content():
 
 # 요약을 원하는 문서의 페이지만 요약하는 API
 @app.route('/api/summarize-page-content', methods=['POST'])
+@require_auth
 def summarize_page_content():
     try:
         data = request.get_json()
@@ -1648,6 +1656,7 @@ def summarize_page_content():
 
 
 @app.route('/api/compare-documents', methods=['POST'])
+@require_auth
 def compare_documents():
     try:
         data = request.json
@@ -1677,6 +1686,7 @@ def compare_documents():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/change-database', methods=['POST'])
+@require_auth
 def change_database():
     try:
         data = request.json
@@ -1714,6 +1724,7 @@ def change_database():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/get-current-db-config', methods=['GET'])
+@require_auth
 def get_current_db_config():
     try:
         current_config = {
@@ -1737,6 +1748,7 @@ def get_current_db_config():
 
 
 @app.route('/api/health', methods=['GET'])
+@require_auth
 def health_check():
     """상태 확인 엔드포인트"""
     try:
@@ -1793,155 +1805,128 @@ def after_request(response):
         response.headers['Access-Control-Allow-Methods'] = 'GET, PUT, POST, DELETE, OPTIONS'
     return response
 
-
-@app.route('/api/messages', methods=['GET'])
-def list_messages():
-    """Get all system messages"""
-    try:
-        messages = message_manager.list_system_messages()
-        return jsonify({"success": True, "messages": messages})
-    except Exception as e:
-        logging.error(f"Error listing messages: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route('/api/messages/<name>', methods=['GET'])
-def get_message(name):
-    """Get a specific system message"""
-    try:
-        message = message_manager.load_system_message(name)
-        if message is None:
-            return jsonify({"success": False, "error": "Message not found"}), 404
-        return jsonify({"success": True, "message": message})
-    except Exception as e:
-        logging.error(f"Error getting message: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route('/api/messages', methods=['POST'])
-def save_message():
-    """Save a new system message"""
-    try:
-        data = request.get_json()
-        name = data.get('name')
-        message = data.get('message')
-        description = data.get('description', '')
+@app.route('/api/get_system_message_list', methods=['POST'])
+@require_auth
+def get_system_message_list():
+    """특정 시스템 메시지 조회 API"""    
+    user_id = int(request.json.get('user_id'))
+    name = request.json.get('name')
         
-        if not all([name, message]):
-            return jsonify({"success": False, "error": "Name and message are required"}), 400
-            
-        success = message_manager.save_system_message(name, message, description)
-        if success:
-            return jsonify({"success": True})
-        return jsonify({"success": False, "error": "Failed to save message"}), 500
-    except Exception as e:
-        logging.error(f"Error saving message: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    
+    message = db_manager.list_system_messages(user_id)
+    
+    if message:
+        return jsonify(message), 200
+    else:
+        return jsonify({'message': f"메시지 '{name}'를 찾을 수 없습니다."}), 404
 
-@app.route('/api/messages/<name>', methods=['PUT'])
-def edit_message(name):
-    """Edit an existing system message"""
-    try:
-        data = request.get_json()
-        new_message = data.get('message')
-        new_description = data.get('description')
+@app.route('/api/get_system_message', methods=['POST'])
+@require_auth
+def get_message():
+    """특정 시스템 메시지 조회 API"""    
+    user_id = int(request.json.get('user_id'))
+    name = request.json.get('name')
         
-        if not new_message:
-            return jsonify({"success": False, "error": "Message content is required"}), 400
-            
-        success = message_manager.edit_system_message(name, new_message, new_description)
-        if success:
-            return jsonify({"success": True})
-        return jsonify({"success": False, "error": "Message not found"}), 404
-    except Exception as e:
-        logging.error(f"Error editing message: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    
+    message = db_manager.get_system_message(name, user_id)
+    
+    if message:
+        return jsonify(message), 200
+    else:
+        return jsonify({'message': f"메시지 '{name}'를 찾을 수 없습니다."}), 404
 
-@app.route('/api/messages/<name>', methods=['DELETE'])
-def delete_message(name):
-    """Delete a system message"""
+@app.route('/api/save_system_message', methods=['POST'])
+@require_auth
+def create_message():
+    """시스템 메시지 생성 API"""
+    data = request.get_json()
+    
+    # 필수 필드 검증
+    if not all(k in data for k in ('name', 'message')):
+        return jsonify({'message': '메시지 이름과 내용은 필수입니다!'}), 400    
+    
+    
+    result = db_manager.save_system_message(
+        name=data['name'],
+        message=data['message'],
+        description=data.get('description', ''),
+        user_id=data.get('user_id')
+    )
+    if result:
+        return jsonify({'message': '메시지가 성공적으로 저장되었습니다.'}), 201
+    else:
+        return jsonify({'message': '메시지 저장에 실패했습니다.'}), 400
+
+@app.route('/api/update_system_message', methods=['POST'])
+@require_auth
+def update_message():
+    """시스템 메시지 수정 API"""
+    data = request.get_json()
+    
+    # 필수 필드 검증
+    if 'message' not in data:
+        return jsonify({'message': '메시지 내용은 필수입니다!'}), 400    
+        
+    result = db_manager.edit_system_message(
+        name=data['name'],
+        new_message=data['message'],
+        new_description=data.get('description'),
+        user_id= data.get('user_id')
+    )
+    
+    if result:
+        return jsonify({'message': '메시지가 성공적으로 수정되었습니다.'}), 200
+    else:
+        return jsonify({'message': '메시지 수정에 실패했습니다.'}), 400
+
+@app.route('/api/delete_system_message', methods=['POST'])
+@require_auth
+def delete_message():
+    """시스템 메시지 삭제 API"""
+    user_id = int(request.json.get('user_id'))
+    name = request.json.get('name')
+    
+    result = db_manager.delete_system_message(name, user_id)
+    
+    if result:
+        return jsonify({'message': '메시지가 성공적으로 삭제되었습니다.'}), 200
+    else:
+        return jsonify({'message': '메시지 삭제에 실패했습니다.'}), 400
+
+@app.route('/api/get_current_selected_message', methods=['POST'])
+@require_auth
+def get_current_message():
+    """현재 선택된 메시지 조회 API"""
     try:
-        success = message_manager.delete_system_message(name)
-        if success:
-            return jsonify({"success": True})
-        return jsonify({"success": False, "error": "Message not found"}), 404
-    except Exception as e:
-        logging.error(f"Error deleting message: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        user_id = int(request.json.get('user_id'))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid user_id"}), 400
+    
+    selected_message = db_manager.get_selected_system_message(user_id)
+    
+    if selected_message:
+        return jsonify(selected_message), 200
+    else:
+        return jsonify({"data": None}), 404  # Consider 404 for no content
 
-@app.route('/api/storage/reset', methods=['POST'])
-def reset_storage():
-    """Reset the storage directory"""
-    try:
-        success = message_manager.reset_storage()
-        if success:
-            return jsonify({"success": True})
-        return jsonify({"success": False, "error": "Failed to reset storage"}), 500
-    except Exception as e:
-        logging.error(f"Error resetting storage: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route('/api/selected-message', methods=['GET'])
-def get_selected_message():
-   try:
-       selected_message = message_manager.get_selected_message()
-       
-       # 메시지가 실제로 존재하는지 확인
-       message_exists = message_manager.load_system_message(selected_message)
-       if message_exists:
-           return jsonify({
-               "success": True,
-               "selectedMessage": selected_message
-           })
-           
-       # 메시지가 존재하지 않으면 default 반환
-       return jsonify({
-           "success": True, 
-           "selectedMessage": "default"
-       })
-   except Exception as e:
-       logger.error(f"Error getting selected message: {str(e)}")
-       return jsonify({
-           "success": False,
-           "error": str(e)
-       }), 500
-
-@app.route('/api/selected-message', methods=['POST'])
-def save_selected_message():
-   try:
-       data = request.get_json()
-       selected_message = data.get('selectedMessage')
-       
-       # 메시지 이름이 없는 경우
-       if not selected_message:
-           return jsonify({
-               "success": False,
-               "error": "Selected message name is required"
-           }), 400
-           
-       # 해당 메시지가 실제로 존재하는지 확인
-       message_exists = message_manager.load_system_message(selected_message)
-       if not message_exists:
-           return jsonify({
-               "success": False,
-               "error": f"Message '{selected_message}' does not exist"
-           }), 404
-           
-       # 존재하는 메시지만 저장
-       success = message_manager.save_selected_message(selected_message)
-       if success:
-           return jsonify({"success": True})
-       else:
-           return jsonify({
-               "success": False,
-               "error": "Failed to save selected message"
-           }), 500
-           
-   except Exception as e:
-       logger.error(f"Error saving selected message: {str(e)}")
-       return jsonify({
-           "success": False,
-           "error": str(e)
-       }), 500
-
+@app.route('/api/save_selected_message', methods=['POST'])
+@require_auth
+def set_selected_message():
+    """선택된 메시지 설정 API"""
+    user_id = int(request.json.get('user_id'))
+    name = request.json.get('name')    
+    
+    # 필수 필드 검증
+    if not name:
+        return jsonify({'message': '메시지 이름은 필수입니다!'}), 400
+    
+    
+    result = db_manager.save_selected_message(name, user_id)
+    
+    if result:
+        return jsonify({'message': '선택된 메시지가 성공적으로 설정되었습니다.'}), 200
+    else:
+        return jsonify({'message': '선택된 메시지 설정에 실패했습니다.'}), 400
 
 
 if __name__ == '__main__':
