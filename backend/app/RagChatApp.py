@@ -8,7 +8,8 @@ from backend.app.PostgresDbManager import PostgresDbManager
 from backend.app.db_manager import DatabaseManager
 from backend.app.CustomSentenceTransformerEmbeddings import CustomSentenceTransformerEmbeddings as CSTFM
 from backend.app.systemMessageManager import SystemMessageManager
-from backend.app.ollamaOptimizer import ollamaOptimizer
+from backend.app.ollamaOptimizer import OllamaFullGPUOptimizer
+
 
 from dotenv import load_dotenv, set_key
 from pathlib import Path
@@ -163,7 +164,11 @@ class RAGChatApp:
         self.groq = GroqManager()
         self.groq_models = self.load_models_from_env("GROQ")
         self.baseurl = "http://localhost:1234/v1"
-        self.ollama_processor = ollamaOptimizer(max_workers=3)
+        self.ollama_processor =OllamaFullGPUOptimizer(
+            max_workers=10,           # 동시 스레드 수
+            connection_pool_size=15,  # 연결 풀 크기
+            base_url=os.environ['OLLAMA_HOST']  # 명시적으로 URL 전달
+        )
         sysMan = SystemMessageManager();
         sysManMessge=sysMan.get_selected_system_message(sysMan.get_current_selected_message_name())
         self.system_message = sysManMessge

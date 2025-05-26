@@ -273,30 +273,49 @@ class AuthService:
         try:
             with self.db_pool.get_connection() as conn:
                 with conn.cursor() as cur:
-                    # 기존 그룹 삭제 시도
-                    try:
+                    # group_ids가 비어있는 경우
+                    if not group_ids:
+                        # 모든 그룹 연결 제거
                         cur.execute("""
                             DELETE FROM user_groups
                             WHERE user_id = %s
                         """, (user_id,))
-                    except Exception as e:
-                        # 삭제 중 에러가 발생해도 로그만 남기고 계속 진행
-                        print(f"Delete operation error: {str(e)}")
-                    
-                    # group_ids가 비어있는 경우도 성공으로 처리 (모든 그룹 연결 제거)
-                    if not group_ids:
-                        conn.rollback()
+                        conn.commit()
                         return {
-                            'success': False,
+                            'success': True,
                             'message': '모든 그룹 연결이 제거되었습니다.'
                         }
 
                     try:
-                        values = [(user_id, group_id) for group_id in group_ids]
-                        cur.executemany("""
-                            INSERT INTO user_groups (user_id, group_id)
-                            VALUES (%s, %s)
-                        """, values)
+                        # 기존에 존재하는 그룹 ID 확인
+                        cur.execute("""
+                            SELECT group_id FROM user_groups 
+                            WHERE user_id = %s
+                        """, (user_id,))
+                        existing_group_ids = set(row[0] for row in cur.fetchall())
+
+                        # 새로 추가할 그룹 식별
+                        new_group_ids = [
+                            group_id for group_id in group_ids 
+                            if group_id not in existing_group_ids
+                        ]
+
+                        # 새 그룹 권한 삽입
+                        if new_group_ids:
+                            values = [(user_id, group_id) for group_id in new_group_ids]
+                            cur.executemany("""
+                                INSERT INTO user_groups (user_id, group_id)
+                                VALUES (%s, %s)
+                            """, values)
+
+                        # 삭제해야 할 그룹 식별
+                        groups_to_remove = existing_group_ids - set(group_ids)
+                        if groups_to_remove:
+                            cur.execute("""
+                                DELETE FROM user_groups 
+                                WHERE user_id = %s AND group_id IN %s
+                            """, (user_id, tuple(groups_to_remove)))
+
                         conn.commit()
                         return {
                             'success': True,
@@ -304,73 +323,101 @@ class AuthService:
                         }
 
                     except ValueError as ve:
-                        # 정수 변환 실패 시
                         conn.rollback()
+                        self.logger.error(f"Error getting groups: {ve}")
                         return {
                             'success': False,
                             'message': f'잘못된 그룹 ID 형식입니다: {str(ve)}'
                         }
-                    except Exception as insert_error:
-                        # 기타 삽입 중 오류 발생 시
+                    except Exception as update_error:
                         conn.rollback()
+                        self.logger.error(f"Error getting groups: {ve}")
                         return {
                             'success': False,
-                            'message': f'그룹 생성 중 오류가 발생했습니다: {str(insert_error)}'
+                            'message': f'그룹 업데이트 중 오류가 발생했습니다: {str(update_error)}'
                         }
 
         except Exception as e:
-            # 데이터베이스 연결 등 전반적인 오류
             return {
                 'success': False,
                 'message': f'데이터베이스 작업 중 오류가 발생했습니다: {str(e)}'
             }
     
-    def update_collection_groups(self,collection_id: int, group_ids: List[str]) -> Dict[str, Union[bool, str]]:
+    def update_collection_groups(self, collection_id: int, group_ids: List[str]) -> Dict[str, Union[bool, str]]:
         """사용자의 그룹 목록 업데이트"""
         try:
             with self.db_pool.get_connection() as conn:
                 with conn.cursor() as cur:
-                    # 기존 그룹 삭제 시도
-                    try:
-                        cur.execute("""
-                            DELETE FROM collection_permissions
-                            WHERE collection_id = %s
-                        """, (collection_id,))
-                    except Exception as e:
-                        # 삭제 중 에러가 발생해도 로그만 남기고 계속 진행
-                        print(f"Delete operation error: {str(e)}")
-                    
-                    # group_ids가 비어있는 경우도 성공으로 처리 (모든 그룹 연결 제거)
+                    # group_ids가 비어있는 경우
                     if not group_ids:
-                        conn.rollback()
                         return {
                             'success': False,
-                            'message': '모든 그룹 연결이 제거되었습니다.'
+                            'message': '그룹 목록이 비어있습니다.'
                         }
 
+                    current_time = datetime.now()
+                    
                     try:
-                        
-                        # 새로운 권한 정보 삽입
-                        current_time = datetime.now()
-                    
-                        # 새로운 권한 정보 삽입
-                        values = [
-                        (
-                            collection_id,
-                            group['group_id'],  # group_id
-                            group['permissions']['read'],
-                            group['permissions']['write'],
-                            group['permissions']['delete'],                            
-                            current_time,
-                            current_time
-                        ) 
-                        for group in group_ids]
-                    
-                        cur.executemany("""
-                            INSERT INTO collection_permissions 
-                            (collection_id, group_id, can_read, can_write, can_delete, created_at, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """, values)
+                        # 기존에 존재하는 그룹 권한 확인
+                        cur.execute("""
+                            SELECT group_id FROM collection_permissions 
+                            WHERE collection_id = %s
+                        """, (collection_id,))
+                        existing_group_ids = set(row[0] for row in cur.fetchall())
+
+                        # 새로 추가할 그룹 식별
+                        new_groups = [
+                            group for group in group_ids 
+                            if group['group_id'] not in existing_group_ids
+                        ]
+
+                        # 이미 존재하는 그룹의 권한 업데이트
+                        update_groups = [
+                            group for group in group_ids 
+                            if group['group_id'] in existing_group_ids
+                        ]
+
+                        # 새 그룹 권한 삽입
+                        if new_groups:
+                            values = [
+                                (
+                                    collection_id,
+                                    group['group_id'],
+                                    group['permissions']['read'],
+                                    group['permissions']['write'],
+                                    group['permissions']['delete'],                            
+                                    current_time,
+                                    current_time
+                                ) 
+                                for group in new_groups
+                            ]
+                            cur.executemany("""
+                                INSERT INTO collection_permissions 
+                                (collection_id, group_id, can_read, can_write, can_delete, created_at, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """, values)
+
+                        # 기존 그룹 권한 업데이트
+                        if update_groups:
+                            for group in update_groups:
+                                cur.execute("""
+                                    UPDATE collection_permissions 
+                                    SET 
+                                        can_read = %s, 
+                                        can_write = %s, 
+                                        can_delete = %s, 
+                                        updated_at = %s
+                                    WHERE 
+                                        collection_id = %s AND group_id = %s
+                                """, (
+                                    group['permissions']['read'],
+                                    group['permissions']['write'],
+                                    group['permissions']['delete'],
+                                    current_time,
+                                    collection_id,
+                                    group['group_id']
+                                ))
+
                         conn.commit()
                         return {
                             'success': True,
@@ -378,22 +425,19 @@ class AuthService:
                         }
 
                     except ValueError as ve:
-                        # 정수 변환 실패 시
                         conn.rollback()
                         return {
                             'success': False,
                             'message': f'잘못된 그룹 ID 형식입니다: {str(ve)}'
                         }
                     except Exception as insert_error:
-                        # 기타 삽입 중 오류 발생 시
                         conn.rollback()
                         return {
                             'success': False,
-                            'message': f'그룹 생성 중 오류가 발생했습니다: {str(insert_error)}'
+                            'message': f'그룹 업데이트 중 오류가 발생했습니다: {str(insert_error)}'
                         }
 
         except Exception as e:
-            # 데이터베이스 연결 등 전반적인 오류
             return {
                 'success': False,
                 'message': f'데이터베이스 작업 중 오류가 발생했습니다: {str(e)}'

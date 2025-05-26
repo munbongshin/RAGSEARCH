@@ -6,6 +6,8 @@ import PyPDF2
 import docx
 import logging
 import pdfplumber
+import pymupdf4llm
+import fitz
 import json
 
 from openpyxl import load_workbook
@@ -22,6 +24,8 @@ import hwp5
 from hwp5.xmlmodel import Hwp5File
 import platform
 import numpy as np
+from langchain.text_splitter import MarkdownTextSplitter
+
 
 if platform.system() == 'Windows':
     import win32com.client as win32    
@@ -39,24 +43,24 @@ class TableProcessor:
 
     def process_table(self, table: List[List[str]]) -> str:
         """
-        모든 형태의 데이터를 마크다운 표 형식으로 변환하는 범용 처리기
+        모든 형태의 데이터를 JSON 형식으로 변환하는 범용 처리기
         
         Args:
             table (List[List[str]]): 2차원 리스트 형태의 표 데이터
         Returns:
-            str: 마크다운 형식의 표
+            str: JSON 형식의 문자열
         """
         try:
             if not table or not any(any(cell for cell in row) for row in table):
-                return ""
+                return "[]"
 
             processed_table = self._preprocess_data(table)
-            col_widths = self._calculate_column_widths(processed_table)
-            return self._generate_markdown_table(processed_table, col_widths)
+            json_data = self._generate_json(processed_table)
+            return json.dumps(json_data, ensure_ascii=False, indent=2)
 
         except Exception as e:
             self.logger.error(f"표 처리 중 오류 발생: {str(e)}")
-            return str(table)
+            return json.dumps(str(table), ensure_ascii=False, indent=2)
 
     def _preprocess_data(self, table: List[List[str]]) -> List[List[str]]:
         """데이터 전처리"""
@@ -69,60 +73,41 @@ class TableProcessor:
             for cell in row:
                 cell_str = str(cell).strip() if cell else ""
                 
+                # 시간 형식 처리 (예: 12:34-13:45)
                 if re.search(r'\d{1,2}:\d{2}', cell_str):
                     if '-' in cell_str:
                         times = cell_str.split('-')
                         if len(times) == 2:
                             cell_str = f"{times[0].strip()}-{times[1].strip()}"
                 
+                # 괄호 처리 (예: "텍스트(추가정보)" -> 분리된 형식)
                 if '(' in cell_str and ')' in cell_str:
                     main_text = cell_str.split('(')[0].strip()
-                    info = cell_str[cell_str.find('('):]
-                    cell_str = f"{main_text}<br>{info}"
+                    info = cell_str[cell_str.find('('):].strip()
+                    cell_str = f"{main_text} {info}"  # JSON에서는 <br> 대신 공백으로 연결
                 
                 processed_row.append(cell_str)
             processed.append(processed_row)
         
         return processed
 
-    def _calculate_column_widths(self, table: List[List[str]]) -> List[int]:
-        """각 열의 최대 너비 계산"""
+    def _generate_json(self, table: List[List[str]]) -> List[dict]:
+        """JSON 데이터 생성"""
         if not table:
             return []
-            
-        widths = []
-        for col_idx in range(max(len(row) for row in table)):
-            col_cells = [row[col_idx] if col_idx < len(row) else "" for row in table]
-            width = max((len(str(cell).split('<br>')[0]) for cell in col_cells), default=0)
-            widths.append(width)
-            
-        return widths
 
-    def _generate_markdown_table(self, table: List[List[str]], col_widths: List[int]) -> str:
-        """마크다운 표 생성"""
-        if not table:
-            return ""
+        headers = table[0]  # 첫 번째 행을 헤더로 사용
+        json_data = []
 
-        header = table[0]
-        md_table = [
-            "| " + " | ".join(str(cell).ljust(width) for cell, width in zip(header, col_widths)) + " |",
-            "|" + "|".join("-" * (width + 2) for width in col_widths) + "|"
-        ]
-
+        # 두 번째 행부터 데이터를 딕셔너리로 변환
         for row in table[1:]:
-            formatted_cells = []
+            row_dict = {}
             for col_idx, cell in enumerate(row):
-                if col_idx < len(col_widths):
-                    if '<br>' in str(cell):
-                        main_text, info = str(cell).split('<br>')
-                        formatted_cell = f"{main_text.ljust(col_widths[col_idx])}<br>{info}"
-                    else:
-                        formatted_cell = str(cell).ljust(col_widths[col_idx])
-                    formatted_cells.append(formatted_cell)
-            
-            md_table.append("| " + " | ".join(formatted_cells) + " |")
-
-        return "\n".join(md_table)
+                if col_idx < len(headers):
+                    row_dict[headers[col_idx]] = cell
+            json_data.append(row_dict)
+        
+        return json_data
 
 class ExtractTextFromFile:
     def __init__(self):
@@ -191,7 +176,108 @@ class ExtractTextFromFile:
             # 우리가 파일을 열었다면 닫아줍니다
             if file_obj and isinstance(file_obj, io.IOBase) and not isinstance(file_obj, io.BytesIO):
                 file_obj.close()
-                 
+    
+    def extract_text_from_pdf4llm_pages(self, file: Union[str, IO], file_name) -> List[Document]:
+        """
+        Extract text from PDF pages using pymupdf4llm and split into chunks using MarkdownTextSplitter.
+        """
+        if not isinstance(file, (str, io.IOBase)):
+            raise TypeError("file must be a string path or a file-like object")
+
+        if isinstance(file, io.IOBase) and not file.readable():
+            raise ValueError("file must be opened in read mode")
+
+        documents = []
+        file_obj = None
+        
+        try:
+            if isinstance(file, str):
+                file_obj = open(file, 'rb')
+            else:
+                file_obj = file
+
+            logger.debug(f"Processing PDF file: {file_name}")
+            
+            # PDF를 마크다운으로 변환 (페이지별 처리)
+            pages = pymupdf4llm.to_markdown(
+                file_obj,
+                page_chunks=True,     # 페이지별 분리 출력
+                force_text=True,      # 이미지와 겹치는 텍스트도 추출
+                table_strategy='lines',  # 테이블 감지 전략
+                show_progress=True    # 진행 상황 표시                
+            )
+            
+            logger.debug(f"Number of pages detected: {len(pages)}")
+            
+            # Markdown 텍스트 분할기 초기화
+            splitter = MarkdownTextSplitter(
+                chunk_size=2048,      # 청크 크기 설정
+                chunk_overlap=200,    # 청크 간 중복 설정
+                strip_whitespace=True # 공백 제거
+            )
+            
+            # 각 페이지 처리
+            for page_num, page_data in enumerate(pages, 1):
+                logger.debug(f"Processing page {page_num}")
+                full_text = ""
+                # 페이지 텍스트 추출
+                if page_data.get('text'):
+                    text = page_data.get('text', '')
+                    # 줄바꿈 보존 로직 추가
+                    text = re.sub(r'\n{2,}', '\n', text)  # 연속된 줄바꿈 정규화
+                    full_text += text + "\n\n"
+                    # 텍스트 정리
+                    cleaned_text = full_text
+                    
+                    if cleaned_text.strip():
+                        # 페이지 텍스트를 청크로 분할
+                        chunks = splitter.split_text(cleaned_text)
+                        logger.debug(f"Page {page_num}: Split into {len(chunks)} chunks")
+                        
+                        # 각 청크를 Document 객체로 변환
+                        for chunk_num, chunk in enumerate(chunks, 1):
+                            metadata = {
+                                "source": os.path.basename(file_name),
+                                "file_name": file_name,
+                                "page": page_num,
+                                "total_pages": len(pages),
+                                "chunk": chunk_num,
+                                "total_chunks_in_page": len(chunks)
+                            }
+                            
+                            # 원본 페이지 메타데이터 추가
+                            if 'metadata' in page_data:
+                                original_metadata = page_data['metadata']
+                                metadata.update({
+                                    k: v for k, v in original_metadata.items()
+                                    if k not in metadata
+                                })
+                            
+                            doc = Document(
+                                page_content=chunk,
+                                source=os.path.basename(file_name),
+                                metadata=metadata
+                            )
+                            documents.append(doc)
+                            logger.debug(f"Added chunk {chunk_num} from page {page_num}")
+                    else:
+                        logger.debug(f"Page {page_num} was empty after cleaning")
+
+            logger.debug(f"Total documents created: {len(documents)}")
+            return documents
+
+        except Exception as e:
+            logger.error(f"Error processing PDF file: {str(e)}", exc_info=True)
+            logger.exception(e)  # 상세한 스택 트레이스 출력
+            return []
+
+        finally:
+            if file_obj and isinstance(file_obj, io.IOBase) and not isinstance(file_obj, io.BytesIO):
+                file_obj.close()
+                logger.debug("File object closed")
+    
+    
+    
     def extract_text_from_pdf_pages_plumber(self, file: Union[str, IO], file_name: str) -> List[Document]:
         """
         PDF에서 텍스트 추출
@@ -365,54 +451,58 @@ class ExtractTextFromFile:
 
         return "\n".join(table_text)
     
-    def clean_text2(self, text) -> str:
-        try:
-            # 1. bytes 처리를 가장 먼저
-            if isinstance(text, bytes):
-                try:
-                    text = text.decode('utf-8')
-                except UnicodeDecodeError:
-                    try:
-                        text = text.decode('cp949')
-                    except UnicodeDecodeError:
-                        logger.warning(f"Failed to decode bytes: {text}")
-                        return str(text)
+    def clean_text2(self, text):
+        # Remove extra whitespaces while preserving some structure
+        text = re.sub(r'\n{2,}', '\n\n', text)  # Normalize multiple line breaks
+        text = re.sub(r' +', ' ', text)  # Remove multiple spaces
+        
+        # Optional: Handle hyphenation
+        text = re.sub(r'-\n', '', text)  # Remove hyphenation line breaks
+        
+        return text.strip()
 
-            # 원본이 None이거나 빈 문자열인 경우
-            if not text:
-                return ""
-                    
-            # 문자열로 변환
-            text = str(text).strip()
+    def format_table(self, table_lines: List[str]) -> List[str]:
+        """
+        Format markdown table lines.
+        """
+        if not table_lines:
+            return []
+        
+        # 테이블 열 수 파악
+        max_columns = 0
+        for line in table_lines:
+            cells = [cell.strip() for cell in line.split('|')]
+            cells = [cell for cell in cells if cell]  # 빈 셀 제거
+            max_columns = max(max_columns, len(cells))
+        
+        formatted_lines = []
+        for i, line in enumerate(table_lines):
+            # 기본 정리
+            line = line.strip().strip('|')
+            if not line:
+                continue
             
-            # 중복된 특수 문자 제거
-            text = re.sub(r'\|{2,}', '|', text)  # 연속된 | 기호 하나로 줄이기
-            text = re.sub(r'-{2,}', ' ', text)   # 연속된 - 기호 공백으로 대체
-
-            # 마크다운 형식으로 전처리
-            text = re.sub(r'\n{3,}', '\n\n', text)  # 연속된 줄바꿈 2줄까지만 유지
-            text = re.sub(r'^(\d+)\.\s*(.+)$', r'**\1. \2**', text, flags=re.MULTILINE)  # 번호 목록 강조
-            text = re.sub(r'^(.+):$', r'**\1:**', text, flags=re.MULTILINE)  # 콜론 라인 강조
-
-            # HTML 이스케이프 처리
-            text = html.escape(text)
-            html_content=text
-            # Markdown으로 변환
-            """html_content = markdown.markdown(
-                text, 
-                extensions=[
-                    'markdown.extensions.fenced_code',
-                    'markdown.extensions.tables',
-                    'markdown.extensions.nl2br'  # 줄바꿈 처리
-                ],
-                output_format='html5'
-            )"""
-
-            return html_content.strip()
-                
-        except Exception as e:
-            logger.error(f"텍스트 정제 중 오류 발생: {str(e)}")
-            return str(text)
+            # 구분선 처리 (모든 문자가 - 또는 |인 경우)
+            if all(c in '|-' for c in line.replace(' ', '')):
+                separator = '|' + '---|' * max_columns
+                formatted_lines.append(separator)
+                continue
+            
+            # 일반 행 처리
+            cells = [cell.strip() for cell in line.split('|')]
+            # 부족한 열 채우기
+            while len(cells) < max_columns:
+                cells.append('')
+            
+            formatted_line = '|' + '|'.join(cells) + '|'
+            formatted_lines.append(formatted_line)
+            
+            # 첫 행 다음에 구분선 추가
+            if i == 0:
+                separator = '|' + '---|' * max_columns
+                formatted_lines.append(separator)
+        
+        return [''] + formatted_lines + ['']
 
     def clean_text(self, text) -> str:
         """
@@ -1053,6 +1143,7 @@ class ExtractTextFromFile:
             
             # 파일 형식별 처리
             if ext == '.pdf':
+                #docs = self.extract_text_from_pdf4llm_pages(file_path, file_name)
                 docs = self.extract_text_from_pdf_pages_plumber(file_path, file_name)
             elif ext in ['.docx', '.doc']:
                 docs = self.extract_text_from_docx_pages(file_path)
@@ -1139,7 +1230,9 @@ class ExtractTextFromFile:
             self.close_hwp_popups()
             file_name = os.path.basename(temp_pdf_path) # hwp이름을 pdf로 확장자로 변경하여 전달
             #print(f"file path for pdf :{temp_pdf_path}  {file_name}")
-            logger.debug(f"PDF file created: {temp_pdf_path}")            
+            logger.debug(f"PDF file created: {temp_pdf_path}")  
+            #documents = self.extract_text_from_pdf4llm_pages(temp_pdf_path, file_name)          
+            
             documents = self.extract_text_from_pdf_pages_plumber(temp_pdf_path, file_name)
 
             logger.info(f"HWP to PDF conversion completed: {temp_pdf_path}")

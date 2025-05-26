@@ -29,6 +29,7 @@ from langchain.chains.summarize import load_summarize_chain
 from konlpy.tag import Okt
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from logging.handlers import RotatingFileHandler
+from sshtunnel import SSHTunnelForwarder
 
 
 # 프로젝트 루트 디렉토리 설정
@@ -80,203 +81,34 @@ def adapt_uuid(uuid):
     return psycopg2.extensions.adapt(str(uuid))
 register_adapter(uuid.UUID, adapt_uuid)
 
-class VectorStoreType:
-    """벡터 저장소 타입 정의"""
-    POSTGRES = "postgres"
-
-class VectorStore:
-    """벡터 저장소 기본 클래스"""
-    def __init__(self, host: str, port: int, database: str, user: str, password: str):
-        self.conn_params = {
-            "host": host,
-            "port": port,
-            "database": database,
-            "user": user,
-            "password": password
-        }
-        self.conn = None
-        self.embedding_model = CSTFM()
-        self._connect()
-        
-
-    def _connect(self):
-        """데이터베이스 연결 설정"""
-        try:
-            self.conn = psycopg2.connect(**self.conn_params, cursor_factory=DictCursor)
-            with self.conn.cursor() as cur:
-                cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-                cur.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";")
-            self.conn.commit()
-        except Exception as e:
-            logger.error(f"Database connection error: {str(e)}")
-            raise
-
-    def _get_or_create_collection(self, collection_name: str) -> int:
-        try:
-            with self.conn.cursor() as cur:
-                # 기존 컬렉션 확인
-                cur.execute(
-                    "SELECT id FROM collections WHERE name = %s",
-                    (collection_name,)
-                )
-                result = cur.fetchone()
-                
-                if result:
-                    return result[0]
-                
-                # 새 컬렉션 생성
-                cur.execute(
-                    "INSERT INTO collections (name) VALUES (%s) RETURNING id",
-                    (collection_name,)
-                )
-                collection_id = cur.fetchone()[0]
-                self.conn.commit()
-                return collection_id
-        except Exception as e:
-            self.conn.rollback()
-            logger.error(f"Error in get_or_create_collection: {str(e)}")
-            raise
-
-    def store_documents(self, text: List[Any], filename: str, collection_name: str) -> int:
-        """문서 저장"""
-        try:
-            # 입력 데이터 유효성 검사
-            if not text:
-                logger.warning("No documents provided for storage")
-                return 0
-            
-            logger.info(f"Attempting to store documents for collection: {collection_name}")
-            logger.info(f"Total number of chunks: {len(text)}")
-            
-            collection_id = self._get_or_create_collection(collection_name)
-            stored_count = 0
-            failed_count = 0
-            
-            for idx, chunk in enumerate(text, 1):
-                try:
-                    # 1. 텍스트 컨텐츠 처리
-                    content = chunk.page_content if hasattr(chunk, 'page_content') else str(chunk)
-                    
-                    if not isinstance(content, str):
-                        content = str(content)
-                    
-                    # 2. 텍스트 정규화
-                    content = content.replace('\xa0', ' ')
-                    content = ' '.join(content.split())
-                    content = content.encode('utf-8', errors='ignore').decode('utf-8')
-                    
-                    # 입력 길이 제한
-                    if len(content) > CHUNKSIZE:  # 예시 길이 제한
-                        content = content[:CHUNKSIZE]
-                    
-                    logger.debug(f"Processing chunk {idx}: {content[:100]}...")
-                    
-                    # 3. 임베딩 생성
-                    try:
-                        embedding = self.embedding_model.embed_documents([content])[0]
-                        
-                        # 추가 검증
-                        if not embedding or (isinstance(embedding, list) and len(embedding) == 0):
-                            logger.warning(f"Empty embedding generated for chunk {idx}")
-                            failed_count += 1
-                            continue
-                        
-                        if not isinstance(embedding, list):
-                            embedding = embedding.tolist()
-                        
-                        # 차원 검증 (예: 768차원 고정)
-                        if len(embedding) != 768:
-                            logger.warning(f"Unexpected embedding dimension for chunk {idx}: {len(embedding)}")
-                            failed_count += 1
-                            continue
-                            
-                    except Exception as e:
-                        logger.error(f"Embedding generation error for chunk {idx}: {str(e)}")
-                        logger.error(f"Problematic content: {content[:200]}")
-                        failed_count += 1
-                        continue
-                    
-                    # 4. 메타데이터 준비
-                    metadata = {
-                        'source': str(filename),
-                        'page': chunk.metadata.get('page', 0) if hasattr(chunk, 'metadata') else 0,
-                        'chunk_size': len(content),
-                        'processed_at': time.strftime('%Y-%m-%d %H:%M:%S')
-                    }
-                    
-                    # 5. 데이터베이스 저장
-                    with self.conn.cursor() as cur:
-                        try:
-                            cur.execute("""
-                                INSERT INTO documents (
-                                    id, collection_id, content, metadata, embedding, search_vector
-                                ) VALUES (
-                                    uuid_generate_v4(), 
-                                    %s, 
-                                    %s, 
-                                    %s, 
-                                    %s::vector, 
-                                    to_tsvector('simple', %s)
-                                )
-                            """, (
-                                collection_id,
-                                content,
-                                Json(metadata),
-                                embedding,
-                                content
-                            ))
-                            stored_count += 1
-                        except psycopg2.Error as db_err:
-                            logger.error(f"Database insertion error for chunk {idx}: {db_err}")
-                            logger.error(f"Problematic data - Content: {content[:200]}, Metadata: {metadata}")
-                            failed_count += 1
-                            self.conn.rollback()
-                            continue
-                    
-                except Exception as e:
-                    failed_count += 1
-                    logger.error(f"Failed to process chunk {idx}: {str(e)}")
-                    continue
-            
-            # 부분 성공/실패 로깅
-            logger.info(f"Document storage completed. Stored: {stored_count}, Failed: {failed_count}")
-            
-            # 커밋은 모든 청크 처리 후에
-            self.conn.commit()
-            
-            return stored_count
-            
-        except Exception as e:
-            self.conn.rollback()
-            logger.error(f"Critical error in store_documents: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
-        
-
-    def close(self):
-        """연결 종료"""
-        if self.conn:
-            self.conn.close()
-
 class PostgresDbManager:
+    from sshtunnel import SSHTunnelForwarder
     def __init__(self):
         try:
             project_root = Path(__file__).parent
             env_path = project_root / '.env'
             load_dotenv(dotenv_path=env_path)
-            
-            self.db_settings = {
-                'host': os.getenv('POSTGRES_HOST'),
-                'port': int(os.getenv('POSTGRES_PORT')),
-                'database': os.getenv('POSTGRES_DB'),
-                'user': os.getenv('POSTGRES_USER'),
-                'password': os.getenv('POSTGRES_PASSWORD')
-            }
-            
-            if not all(self.db_settings.values()):
-                missing_keys = [k for k, v in self.db_settings.items() if not v]
-                raise ValueError(f"Missing required PostgreSQL settings: {', '.join(missing_keys)}")
-            
+            self.db_type = int(os.getenv('POSTGRES_Db_Type'))
+            # db_type에 따라 다른 설정 적용
+            if self.db_type == 0:
+                self.db_settings = {
+                    'host': os.getenv('POSTGRES_HOST'),
+                    'port': int(os.getenv('POSTGRES_PORT')),
+                    'database': os.getenv('POSTGRES_DB'),
+                    'user': os.getenv('POSTGRES_USER'),
+                    'password': os.getenv('POSTGRES_PASSWORD')
+                }
+            elif self.db_type == 1:
+                self.db_settings = {
+                    'host': os.getenv("GPOSTGRES_HOST"),
+                    'port': int(os.getenv("GPOSTGRES_PORT", "5432")),
+                    'database': os.getenv("GPOSTGRES_DB"),
+                    'user': os.getenv("GPOSGITTGRES_USER"),
+                    'password': os.getenv("GPOSTGRES_PASSWORD")
+                }
+            else:
+                raise ValueError(f"Invalid db_type: {self.db_type}. Must be 0 or 1.")            
+          
             self.embeddings = CSTFM()
             self.extractor = ExtractTextFromFile()
             self.docnum = int(os.getenv("DOC_NUM", "3"))
@@ -286,7 +118,7 @@ class PostgresDbManager:
             self.conn = self._create_connection()
             self._initialize_database()
             
-            logger.info("PostgreSQL vector manager successfully initialized")
+            logger.info(f"PostgreSQL vector manager successfully initialized with db_type: {self.db_type}")
             
         except Exception as e:
             logger.error(f"PostgresVectorManager initialization error: {str(e)}")
@@ -295,10 +127,35 @@ class PostgresDbManager:
 
     def _create_connection(self):
         """PostgreSQL 연결 생성"""
-        return psycopg2.connect(
-            **self.db_settings,
-            cursor_factory=DictCursor
-        )
+        if self.db_type == 0:
+            logger.debug("Local 연결 성공")
+            return psycopg2.connect(
+                **self.db_settings,
+                cursor_factory=DictCursor
+            )
+        else:
+            # SSH 터널 생성 및 유지 (인스턴스 변수로 저장)
+            self.tunnel = SSHTunnelForwarder(
+                (os.getenv("SSH_HOST"), int(os.getenv("SSH_PORT", "22"))),
+                ssh_username=os.getenv("SSH_USER"),
+                ssh_password=os.getenv("SSH_PASSWORD"),
+                remote_bind_address=(os.getenv("GPOSTGRES_HOST"), int(os.getenv("GPOSTGRES_PORT", "5432"))),
+                local_bind_address=('127.0.0.1', 0)
+            )
+            self.tunnel.start()
+            
+            logger.debug("SSH 터널링 연결 성공")
+            logger.debug(f"로컬에서 사용할 포트: {self.tunnel.local_bind_host}:{self.tunnel.local_bind_port}")
+
+            # SSH 터널링을 통한 PostgreSQL 연결
+            return psycopg2.connect(
+                dbname=os.getenv("GPOSTGRES_DB"),
+                user=os.getenv("GPOSGITTGRES_USER"),
+                password=os.getenv("GPOSTGRES_PASSWORD"),
+                host=self.tunnel.local_bind_host,
+                port=self.tunnel.local_bind_port,
+                cursor_factory=DictCursor
+            )            
 
     def get_db_connection(self):
         return self.conn
@@ -321,7 +178,7 @@ class PostgresDbManager:
             if self.conn:
                 self.conn.close()
             self.conn = self._create_connection()
-            logger.info("Successfully reconnected to PostgreSQL")
+            logger.debug("Successfully reconnected to PostgreSQL")
         except Exception as e:
             logger.error(f"Database reconnection error: {str(e)}")
             raise
@@ -334,6 +191,47 @@ class PostgresDbManager:
                 # vector 확장 설치
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
                 cur.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";")
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.info("Extensions installed successfully")
+                
+                
+                
+                # groups 테이블 생성
+                cur.execute("""
+                    CREATE SEQUENCE IF NOT EXISTS group_seq START WITH 1;
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS groups (
+                        id VARCHAR(20) DEFAULT 'GRP' || LPAD(NEXTVAL('group_seq')::TEXT, 6, '0'),
+                        name VARCHAR(50) UNIQUE NOT NULL,
+                        description TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (id)
+                        );
+                """)
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.info("Group Table successfully")
+                
+                
+                cur.execute("""
+                    INSERT INTO groups (id, name, description, created_at)
+                    SELECT 'GRP000001', 'admin', '관리자', CURRENT_TIMESTAMP
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM groups WHERE id = 'GRP000001'
+                    );
+                """)
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("Group Table insert successfully")
+                
+                cur.execute("""
+                    INSERT INTO groups (id, name, description, created_at)
+                    SELECT 'GRP000002', 'user', '일반사용자', CURRENT_TIMESTAMP
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM groups WHERE id = 'GRP000002'
+                    );
+                """)
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("Group Table insert successfully")
             
                 # users 테이블 생성
                 cur.execute("""
@@ -352,19 +250,61 @@ class PostgresDbManager:
                         ON DELETE SET NULL
                     );
                 """)
-                # groups 테이블 생성
-                cur.execute("""
-                    CREATE SEQUENCE IF NOT EXISTS group_seq START WITH 1;
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("Users Table successfully")
+                
+                cur.execute("""                
+                    INSERT INTO users (username, password_hash, email, is_active, group_id, created_at)
+                    SELECT 'admin', '$2b$12$cRRaVRZZt/juEL1O1afZVuY/4Xb4q7vn/hNdCNcjKTRfQSWgkUfVW', 'admin@aaa.or.kr', true, 'GRP000001', CURRENT_TIMESTAMP
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM users WHERE username = 'admin'
+                    );
                 """)
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("Users Table insert successfully")
+                
+                
+                # system_messages 테이블 생성
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS groups (
-                        id VARCHAR(20) DEFAULT 'GRP' || LPAD(NEXTVAL('group_seq')::TEXT, 6, '0'),
-                        name VARCHAR(50) UNIQUE NOT NULL,
-                        description TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (id)
-                        );
+                CREATE TABLE IF NOT EXISTS system_messages (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(100) NOT NULL,
+                    message TEXT NOT NULL,
+                    description TEXT,
+                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP,
+                    UNIQUE(name, user_id)
+                );
                 """)
+                
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("system_messages Table successfully")
+                
+                # user_selected_messages 테이블 생성
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_selected_messages (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    message_name VARCHAR(100) NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                """)
+                
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("user_selected_messageses Table successfully")
+                
+                # collections 테이블 생성
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS collections (
+                        id SERIAL PRIMARY KEY,
+                        name VARCHAR(255) UNIQUE NOT NULL,
+                        creator INTEGER NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("collections Table successfully")
+                
                 # 그룹-컬렉션 권한 테이블 생성
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS collection_permissions (
@@ -381,7 +321,8 @@ class PostgresDbManager:
                         UNIQUE(collection_id, group_id)
                     );
                 """)
-                
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("collectio_permissions Table successfully")
                 # 사용자-그룹 매핑 테이블 생성
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS user_groups (
@@ -396,9 +337,11 @@ class PostgresDbManager:
                             REFERENCES groups(id)
                     );
                  """)
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("user_groups Table successfully")
                 # 권한 확인을 위한 뷰 생성
                 cur.execute("""
-                    CREATE VIEW user_collection_permissions AS
+                    CREATE OR REPLACE VIEW user_collection_permissions AS
                     WITH RECURSIVE all_permissions AS (
                         -- 직접적인 그룹 권한
                         SELECT 
@@ -429,7 +372,10 @@ class PostgresDbManager:
                         bool_or(can_delete) as can_delete
                     FROM all_permissions
                     GROUP BY user_id, collection_id;
-                 """)                
+                 """) 
+                
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("sessions  VIEW user_collection_permissions successfully")               
                 
                 # password_reset_tokens 테이블 생성
                 cur.execute("""
@@ -468,15 +414,9 @@ class PostgresDbManager:
                     );
                 """)
                 
-                # collections 테이블 생성
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS collections (
-                        id SERIAL PRIMARY KEY,
-                        name VARCHAR(255) UNIQUE NOT NULL,
-                        creator INTEGER NOT NULL,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                    );
-                """)
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("sessions Table successfully")
+                
                 
                 # documents 테이블 생성
                 cur.execute("""
@@ -495,6 +435,9 @@ class PostgresDbManager:
                     );
                 """)
                 
+                self.conn.commit()  # 확장 설치 후 커밋
+                logger.debug("documents Table successfully")                 
+                                                
                 # 인덱스 존재 여부 확인 후 생성
                 # 사용자 관련 인덱스
                 cur.execute("""
@@ -506,7 +449,7 @@ class PostgresDbManager:
                 """)
                 if not cur.fetchone()[0]:
                     cur.execute("CREATE INDEX idx_users_username ON users(username);")
-                    logger.info("Created index idx_users_username")
+                    logger.debug("Created index idx_users_username")
                     
                 # sessiom 관련 인덱스                    
                 cur.execute("""
@@ -518,7 +461,7 @@ class PostgresDbManager:
                 """)
                 if not cur.fetchone()[0]:
                     cur.execute("CREATE INDEX idx_sessions_session_id ON sessions(session_id);")
-                    logger.info("Created index idx_sessions_session_id")
+                    logger.debug("Created index idx_sessions_session_id")
                 
                 # collection 관련 인덱스
                 cur.execute("""
@@ -734,17 +677,26 @@ class PostgresDbManager:
             return False
     
 
-    def create_collection(self, collection_name: str) -> bool:
+    def create_collection(self, collection_name: str, creator) -> bool:
         """컬렉션 생성"""
         try:
             with self.conn.cursor() as cur:
+                # 컬렉션 생성
                 cur.execute(
-                    "INSERT INTO collections (name) VALUES (%s) RETURNING id",
-                    (collection_name,)
+                    "INSERT INTO collections (name, creator) VALUES (%s, %s) RETURNING id",
+                    (collection_name, creator)
                 )
                 collection_id = cur.fetchone()[0]
+                
+                # admin 그룹에 대한 권한 추가 (관리자는 모든 컬렉션에 접근 가능)
+                cur.execute("""
+                    INSERT INTO collection_permissions 
+                    (collection_id, group_id, can_read, can_write, can_delete)
+                    VALUES (%s, 'GRP000001', true, true, true)
+                """, (collection_id,))
+                
                 self.conn.commit()
-                logger.info(f"Created collection: {collection_name} (ID: {collection_id})")
+                logger.info(f"Created collection: {collection_name} by user {creator} (ID: {collection_id})")
                 return True
                 
         except psycopg2.errors.UniqueViolation:
@@ -759,7 +711,7 @@ class PostgresDbManager:
             return False
     
     def add_permission(self, collection_id: int, group_id: int, 
-                      can_read: bool = False, can_write: bool = False, 
+                      can_read: bool = True, can_write: bool = False, 
                       can_delete: bool = False) -> bool:
         """
         컬렉션에 대한 그룹 권한 추가
@@ -893,6 +845,8 @@ class PostgresDbManager:
                     WHERE cp.collection_id = %s
                     ORDER BY g.name
                 """, (collection_id,))
+                
+                logger.debug("pass get_collection_permissions")
                 
                 return [
                     {
@@ -1165,18 +1119,18 @@ class PostgresDbManager:
         """특정 creator의 컬렉션 목록 조회. admin 그룹인 경우 모든 컬렉션 반환
         
         Args:
-            creator_id (int): 생성자 ID
+            user_id (int): 사용자 ID
             
         Returns:
             list: 컬렉션 목록. 에러 발생 시 빈 리스트 반환
             
         Note:
             반환되는 각 컬렉션은 다음 필드를 포함:
-            - id: 컬렉션 ID
-            - name: 컬렉션 이름
-            - created_at: 생성 시간
-            - creator_id: 생성자 ID
-            - creator_name: 생성자 그룹 이름
+            - collection_id: 컬렉션 ID
+            - collection_name: 컬렉션 이름
+            - can_read: 읽기 권한
+            - can_write: 쓰기 권한
+            - can_delete: 삭제 권한
         """
         try:            
             with self.conn.cursor() as cur:
@@ -1186,15 +1140,9 @@ class PostgresDbManager:
                     FROM user_groups
                     WHERE user_id = %s AND group_id = 'GRP000001'   
                 """, (user_id,))
-                group_result = cur.fetchone()
+                is_admin = cur.fetchone() is not None
                 
-                if not group_result:
-                    is_admin = False
-                else:
-                    is_admin = True               
-                
-                
-                # admin인 경우 모든 컬렉션 반환, 아닌 경우 해당 creator의 컬렉션만 반환
+                # admin인 경우 모든 컬렉션 반환, 아닌 경우 접근 가능한 컬렉션만 반환
                 if is_admin:
                     cur.execute("""
                         SELECT DISTINCT ON (c.id)    
@@ -1202,85 +1150,96 @@ class PostgresDbManager:
                             c.name as collection_name,
                             cp.can_read,
                             cp.can_write,
-                            cp.can_delete
-                        FROM users u
-                        JOIN user_groups ug ON u.id = ug.user_id
-                        JOIN collection_permissions cp ON ug.group_id = cp.group_id
-                        JOIN collections c ON cp.collection_id = c.id
+                            cp.can_delete,
+                            c.creator
+                        FROM collections c
+                        LEFT JOIN collection_permissions cp ON c.id = cp.collection_id
+                        LEFT JOIN user_groups ug ON cp.group_id = ug.group_id
                         ORDER BY c.id, cp.can_read DESC, cp.can_write DESC, cp.can_delete DESC
                     """)
                 else:
+                    # 일반 사용자는 자신이 생성한 컬렉션 또는 권한이 있는 컬렉션만 접근 가능
                     cur.execute("""
                         SELECT DISTINCT ON (c.id)    
                             c.id as collection_id,
                             c.name as collection_name,
-                            cp.can_read,
-                            cp.can_write,
-                            cp.can_delete
-                        FROM users u
-                        JOIN user_groups ug ON u.id = ug.user_id
-                        JOIN collection_permissions cp ON ug.group_id = cp.group_id
-                        JOIN collections c ON cp.collection_id = c.id
-                        WHERE u.id = %s
+                            CASE WHEN c.creator = %s THEN TRUE ELSE cp.can_read END as can_read,
+                            CASE WHEN c.creator = %s THEN TRUE ELSE cp.can_write END as can_write,
+                            CASE WHEN c.creator = %s THEN TRUE ELSE cp.can_delete END as can_delete,
+                            c.creator
+                        FROM collections c
+                        LEFT JOIN collection_permissions cp ON c.id = cp.collection_id
+                        LEFT JOIN user_groups ug ON cp.group_id = ug.group_id
+                        WHERE c.creator = %s OR ug.user_id = %s
                         ORDER BY c.id, cp.can_read DESC, cp.can_write DESC, cp.can_delete DESC
-                    """, (user_id,))
+                    """, (user_id, user_id, user_id, user_id, user_id))
                 
                 collections = cur.fetchall()
                 
                 logger.debug(
-                    f"Retrieved {len(collections)} collections for creator {user_id} "
+                    f"Retrieved {len(collections)} collections for user {user_id} "
                     f"(admin access: {is_admin})"
                 )
                 
                 return collections
                 
         except Exception as e:
-            logger.error(f"Error getting collections for creator {user_id}: {str(e)}")
+            logger.error(f"Error getting collections for user {user_id}: {str(e)}")
             logger.error(traceback.format_exc())
             return []
 
-    def delete_collection(self, collection_name: str) -> str:
+    def delete_collection(self, collection_name):
         """
-        컬렉션과 관련 문서 삭제
-        
+        주어진 이름의 컬렉션을 삭제합니다.
+
         Args:
-            collection_name (str): 삭제할 컬렉션 이름
+            collection_name (str): 삭제할 컬렉션의 이름
             
         Returns:
-            str: 삭제 결과 메시지
+            bool: 삭제 성공 여부
         """
         try:
             with self.conn.cursor() as cur:
-                # 먼저 컬렉션이 존재하는지 확인
+                # 1. 먼저 컬렉션 ID 조회
                 cur.execute(
-                    "SELECT id FROM collections WHERE name = %s",
+                    "SELECT id FROM collections WHERE name = %s", 
                     (collection_name,)
                 )
                 result = cur.fetchone()
                 
                 if not result:
-                    return f"Collection '{collection_name}' not found."
-                
+                    return False, "해당 이름의 컬렉션을 찾을 수 없습니다."
+                    
                 collection_id = result[0]
                 
-                # CASCADE 옵션이 설정되어 있으므로 collections 테이블에서만 삭제하면 됨
+                # 2. 해당 컬렉션에 속한 문서들 먼저 삭제
+                cur.execute(
+                    "DELETE FROM documents WHERE collection_id = %s",
+                    (collection_id,)
+                )
+                
+                # 3. 컬렉션과 관련된 권한 정보 삭제 (만약 있다면)
+                # (권한 관련 테이블이 있는 경우에만 필요)
+                try:
+                    cur.execute(
+                        "DELETE FROM collection_permissions WHERE collection_id = %s",
+                        (collection_id,)
+                    )
+                except Exception as perm_error:
+                    logger.warning(f"권한 삭제 중 오류 발생 (무시됨): {str(perm_error)}")
+                
+                # 4. 이제 컬렉션 삭제
                 cur.execute(
                     "DELETE FROM collections WHERE id = %s",
                     (collection_id,)
                 )
                 
-                # 트랜잭션 커밋 (self.conn.commit()로 수정)
                 self.conn.commit()
-                
-                logger.info(f"Successfully deleted collection: {collection_name}")
-                return f"Collection '{collection_name}' deleted successfully."
-                
+                return True, "컬렉션이 성공적으로 삭제되었습니다."
         except Exception as e:
             self.conn.rollback()
-            error_msg = f"Error deleting collection: {str(e)}"
-            logger.error(error_msg)
             logger.error(traceback.format_exc())
-            return error_msg
+            return False, f"컬렉션 삭제 중 오류 발생: {str(e)}"
 
     def list_collections(self) -> List[str]:
         """모든 컬렉션 목록 반환"""
@@ -1372,31 +1331,168 @@ class PostgresDbManager:
             logger.error(f"Unexpected error while viewing collection '{collection_name}': {str(e)}")
             logger.error(traceback.format_exc())
             return []
+        
+        
+    def _get_or_create_collection(self, collection_name: str) -> int:
+        try:
+            with self.conn.cursor() as cur:
+                # 기존 컬렉션 확인
+                cur.execute(
+                    "SELECT id FROM collections WHERE name = %s",
+                    (collection_name,)
+                )
+                result = cur.fetchone()
+                
+                if result:
+                    return result[0]
+                
+                # 새 컬렉션 생성
+                cur.execute(
+                    "INSERT INTO collections (name) VALUES (%s) RETURNING id",
+                    (collection_name,)
+                )
+                collection_id = cur.fetchone()[0]
+                self.conn.commit()
+                return collection_id
+        except Exception as e:
+            self.conn.rollback()
+            logger.error(f"Error in get_or_create_collection: {str(e)}")
+            raise
+
+    def store_documents(self, text: List[Any], filename: str, collection_name: str) -> int:
+        """문서 저장"""
+        try:
+            # 입력 데이터 유효성 검사
+            if not text:
+                logger.warning("No documents provided for storage")
+                return 0
+            
+            logger.info(f"Attempting to store documents for collection: {collection_name}")
+            logger.info(f"Total number of chunks: {len(text)}")
+            
+            collection_id = self._get_or_create_collection(collection_name)
+            stored_count = 0
+            failed_count = 0
+            
+            for idx, chunk in enumerate(text, 1):
+                try:
+                    # 1. 텍스트 컨텐츠 처리
+                    content = chunk.page_content if hasattr(chunk, 'page_content') else str(chunk)
+                    
+                    if not isinstance(content, str):
+                        content = str(content)
+                    
+                    # 2. 텍스트 정규화
+                    content = content.replace('\xa0', ' ')
+                    content = ' '.join(content.split())
+                    content = content.encode('utf-8', errors='ignore').decode('utf-8')
+                    
+                    # 입력 길이 제한
+                    if len(content) > CHUNKSIZE:  # 예시 길이 제한
+                        content = content[:CHUNKSIZE]
+                    
+                    logger.debug(f"Processing chunk {idx}: {content[:100]}...")
+                    
+                    # 3. 임베딩 생성
+                    try:
+                        embedding = self.embeddings.embed_documents([content])[0]
+                        
+                        # 추가 검증
+                        if not embedding or (isinstance(embedding, list) and len(embedding) == 0):
+                            logger.warning(f"Empty embedding generated for chunk {idx}")
+                            failed_count += 1
+                            continue
+                        
+                        if not isinstance(embedding, list):
+                            embedding = embedding.tolist()
+                        
+                        # 차원 검증 (예: 768차원 고정)
+                        if len(embedding) != 768:
+                            logger.warning(f"Unexpected embedding dimension for chunk {idx}: {len(embedding)}")
+                            failed_count += 1
+                            continue
+                            
+                    except Exception as e:
+                        logger.error(f"Embedding generation error for chunk {idx}: {str(e)}")
+                        logger.error(f"Problematic content: {content[:200]}")
+                        failed_count += 1
+                        continue
+                    
+                    # 4. 메타데이터 준비
+                    metadata = {
+                        'source': str(filename),
+                        'page': chunk.metadata.get('page', 0) if hasattr(chunk, 'metadata') else 0,
+                        'chunk_size': len(content),
+                        'processed_at': time.strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    
+                    # 5. 데이터베이스 저장
+                    with self.conn.cursor() as cur:
+                        try:
+                            cur.execute("""
+                                INSERT INTO documents (
+                                    id, collection_id, content, metadata, embedding, search_vector
+                                ) VALUES (
+                                    uuid_generate_v4(), 
+                                    %s, 
+                                    %s, 
+                                    %s, 
+                                    %s::vector, 
+                                    to_tsvector('simple', %s)
+                                )
+                            """, (
+                                collection_id,
+                                content,
+                                Json(metadata),
+                                embedding,
+                                content
+                            ))
+                            stored_count += 1
+                        except psycopg2.Error as db_err:
+                            logger.error(f"Database insertion error for chunk {idx}: {db_err}")
+                            logger.error(f"Problematic data - Content: {content[:200]}, Metadata: {metadata}")
+                            failed_count += 1
+                            self.conn.rollback()
+                            continue
+                    
+                except Exception as e:
+                    failed_count += 1
+                    logger.error(f"Failed to process chunk {idx}: {str(e)}")
+                    continue
+            
+            # 부분 성공/실패 로깅
+            logger.debug(f"Document storage completed. Stored: {stored_count}, Failed: {failed_count}")
+            
+            # 커밋은 모든 청크 처리 후에
+            self.conn.commit()
+            
+            return stored_count
+            
+        except Exception as e:
+            self.conn.rollback()
+            logger.error(f"Critical error in store_documents: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
 
     def split_embed_docs_store(self, text: List[Document], filename: str, collection_name: str) -> int:
         """VectorStore 방식으로 문서 처리"""
         store = None
         try:
-            # 입력 데이터 유효성 검사
+            # 1. Input validation check
             if not text:
-                logger.warning("No documents provided for processing")
+                logger.debug("No documents provided for processing")
                 return 0
-                
-            logger.info(f"Starting document processing for collection: {collection_name}")
             
-            # 입력 문서 기본 정보 로깅
-            logger.info(f"Total input documents: {len(text)}")
-            logger.debug(f"First document metadata: {text[0].metadata if text else 'N/A'}")
+            logger.debug(f"Starting document processing for collection: {collection_name}")
             
-            # PostgreSQL 벡터 저장소 초기화
-            store = VectorStore(
-                host=self.db_settings['host'],
-                port=self.db_settings['port'],
-                database=self.db_settings['database'],
-                user=self.db_settings['user'],
-                password=self.db_settings['password']
-            )
+            # 2. Logging input details with more defensive programming
+            try:
+                logger.info(f"Total input documents: {len(text)}")
+                logger.debug(f"First document metadata: {text[0].metadata if text else 'N/A'}")
+            except Exception as log_error:
+                print(f"Logging error: {log_error}")  # Fallback print if logger fails
             
+            # 3. Chunk processing - add more explicit error handling
             chunks = text  # 이미 chunk된 데이터이므로 그대로 사용
             
             # 청크 크기 제한 (선택적)
@@ -1406,7 +1502,7 @@ class PostgresDbManager:
             
             # 문서 저장
             try:
-                stored_count = store.store_documents(
+                stored_count = self.store_documents(
                     text=chunks,
                     filename=filename,
                     collection_name=collection_name
@@ -1420,14 +1516,16 @@ class PostgresDbManager:
             logger.info(f"Successfully stored {stored_count} chunks in collection '{collection_name}'")
             
             return stored_count
-            
+        
         except Exception as e:
+            # 7. Comprehensive error logging
             logger.error(f"Critical error in split_embed_docs_store: {str(e)}")
+            logger.error(f"Error type: {type(e).__name__}")
             logger.error(traceback.format_exc())
             return 0
-            
+        
         finally:
-            # 항상 리소스 정리
+            # 8. Safe resource cleanup
             if store:
                 try:
                     store.close()
@@ -1937,8 +2035,8 @@ class PostgresDbManager:
                return filtered_results
 
        except Exception as e:
-           logger.error(f"Search error: {str(e)}")
-           logger.error(traceback.format_exc())
+           logger.debug(f"Search error: {str(e)}")
+           logger.debug(traceback.format_exc())
            return []
 
     def preprocess_fts_query(self, query: str) -> List[str]:
@@ -2402,6 +2500,365 @@ class PostgresDbManager:
         except Exception as e:
             logger.error(f"저장소 검증 오류: {e}")
             return 0
+        
+    def create_default_message(self) -> bool:
+        """기본 시스템 메시지 생성"""
+        default_message = {
+            "name": "default",
+            "message": """You are an intelligent assistant.
+            You always provide well-reasoned answers that are both correct and helpful.
+            If you don't know the answer, just say that you don't know.
+            Please answer in Korean.""",
+            "description": "기본 시스템 메시지",
+            "user_id": 1  # admin 사용자
+        }
+        
+        return self.save_system_message(
+            name=default_message["name"],
+            message=default_message["message"],
+            description=default_message["description"],
+            user_id=default_message["user_id"]
+        )
+    
+    def list_system_messages(self, user_id: int) -> Dict:
+        """사용자의 모든 시스템 메시지 목록 조회"""
+        try:
+            with self.conn.cursor() as cursor:            
+                # 사용자의 메시지와 admin의 글로벌 메시지를 함께 조회
+                cursor.execute("""
+                SELECT id, name, message, description, user_id, 
+                    created_at, updated_at
+                FROM system_messages
+                WHERE user_id = %s OR user_id = 1
+                ORDER BY name
+                """, (user_id,))
+                
+                messages = cursor.fetchall()
+                cursor.close()                
+                
+                # 결과 목록을 저장할 리스트
+                result_messages = []
+                
+                # datetime 객체를 문자열로 변환하고 리스트에 추가
+                for msg in messages:
+                    if msg['created_at']:
+                        msg['created_at'] = str(msg['created_at'])
+                    if msg['updated_at']:
+                        msg['updated_at'] = str(msg['updated_at'])
+                    
+                    result_messages.append({
+                        "id": msg['id'],
+                        "name": msg['name'],
+                        "message": msg['message'],
+                        "description": msg['description'],
+                        "user_id": msg['user_id'],
+                        "created_at": msg['created_at'],
+                        "updated_at": msg['updated_at']
+                    })
+                
+                logging.info(f"사용자 {user_id}의 메시지 {len(result_messages)}개 조회 완료")
+                
+                # 결과를 data 키 아래에 리스트로 반환
+                return {"data": result_messages}
+            
+        except Exception as e:
+            logging.error(f"메시지 목록 조회 오류: {str(e)}")
+            return {"data": []}
+        
+    def save_system_message(self, name: str, message: str, 
+                           description: str = "", user_id: int = 1) -> bool:
+        """시스템 메시지 저장"""
+        try:
+            
+            with self.conn.cursor() as cursor: 
+                # 이미 존재하는 메시지인지 확인
+                cursor.execute("""
+                SELECT id FROM system_messages 
+                WHERE name = %s AND user_id = %s
+                """, (name, user_id))
+                
+                result = cursor.fetchone()
+                
+                if result:
+                    # 기존 메시지 업데이트
+                    cursor.execute("""
+                    UPDATE system_messages
+                    SET message = %s, description = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE name = %s AND user_id = %s
+                    """, (message, description, name, user_id))
+                else:
+                    # 새 메시지 생성
+                    cursor.execute("""
+                    INSERT INTO system_messages 
+                    (name, message, description, user_id)
+                    VALUES (%s, %s, %s, %s)
+                    """, (name, message, description, user_id))
+                               
+                self.conn.commit()
+                cursor.close()
+                
+                
+                logging.info(f"메시지 '{name}' 저장 완료 (사용자 {user_id})")
+                return True
+            
+        except Exception as e:
+            self.conn.rollback()
+            logging.error(f"메시지 저장 오류: {str(e)}")
+           
+    def get_system_message(self, name: str, user_id: int) -> Optional[Dict]:
+        """이름으로 시스템 메시지 조회"""
+        try:
+            with self.conn.cursor() as cursor:
+                # 모든 일치하는 메시지를 가져오도록 쿼리 수정 (LIMIT 제거)
+                cursor.execute("""
+                SELECT id, name, message, description, user_id, 
+                    created_at, updated_at
+                FROM system_messages
+                WHERE (name = %s AND user_id = %s) OR (name = %s AND user_id = 1)
+                ORDER BY user_id DESC
+                """, (name, user_id, name))
+                
+                results = cursor.fetchall()
+                
+                # 결과 목록을 저장할 리스트
+                messages = []
+                
+                if results:
+                    for result in results:
+                        # datetime 객체를 문자열로 변환
+                        if result['created_at']:
+                            result['created_at'] = str(result['created_at'])
+                        if result['updated_at']:
+                            result['updated_at'] = str(result['updated_at'])
+                        
+                        # 결과를 사전 형태로 변환하여 목록에 추가
+                        messages.append({
+                            "id": result['id'],
+                            "name": result['name'],
+                            "message": result['message'],
+                            "description": result['description'],
+                            "user_id": result['user_id'],
+                            "created_at": result['created_at'],
+                            "updated_at": result['updated_at']
+                        })
+                
+                # 결과를 data 키 아래에 리스트로 반환
+                return {"data": messages}
+                    
+        except Exception as e:
+            logging.error(f"메시지 조회 오류: {str(e)}")
+            logging.error(traceback.format_exc())  # 상세 오류 추적
+            return {"data": []}
+    
+    def get_current_selected_message_name(self, user_id: int) -> str:
+        """현재 선택된 메시지 이름 조회"""
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute("""
+                SELECT message_name FROM user_selected_messages
+                WHERE user_id = %s
+                """, (user_id,))
+                
+                result = cursor.fetchone()
+                cursor.close()
+                if result:
+                    return result[0]
+                return "default"
+                
+        except Exception as e:
+            logging.error(f"선택된 메시지 조회 오류: {str(e)}")
+            return "default"
+        
+    def load_system_message(self, user_id: int) -> Optional[Dict]:
+        """사용자가 선택한 메시지 정보를 조회"""
+        try:
+            with self.conn.cursor() as cursor:
+                # 사용자의 선택된 메시지 조회
+                cursor.execute("""
+                SELECT sm.id, sm.name, sm.message, sm.description, sm.user_id, 
+                    sm.created_at, sm.updated_at
+                FROM user_selected_messages sel
+                JOIN system_messages sm ON sel.message_name = sm.name
+                WHERE sel.user_id = %s
+                LIMIT 1
+                """, (user_id,))
+                
+                result = cursor.fetchone()
+                
+                if result:
+                    # datetime 객체를 문자열로 변환
+                    if result['created_at']:
+                        result['created_at'] = str(result['created_at'])
+                    if result['updated_at']:
+                        result['updated_at'] = str(result['updated_at'])
+                    
+                    # 결과를 JSON 형태로 변환
+                    return {
+                        "data": {
+                            "id": result['id'],
+                            "name": result['name'],
+                            "message": result['message']                           
+                        }
+                    }
+                
+                # 선택된 메시지가 없는 경우
+                logging.info(f"사용자 {user_id}의 선택된 메시지 없음")
+                return {"data": None}
+                    
+        except Exception as e:
+            logging.error(f"선택된 메시지 조회 오류: {str(e)}")
+            logging.error(traceback.format_exc())  # 상세 오류 추적
+            return {"data": None}
+
+    def get_selected_system_message(self, user_id: int) -> str:
+        """사용자가 선택한 시스템 메시지 내용 조회"""
+        try:
+            # 해당 이름의 메시지 조회
+            result = self.load_system_message(user_id)
+            
+            if result:
+                return result
+            return ""
+                
+        except Exception as e:
+            logging.error(f"선택된 메시지 내용 조회 오류: {str(e)}")
+            return ""
+            
+    def edit_system_message(self, name: str, new_message: str, 
+                           new_description: str = None, user_id: int = 1) -> bool:
+        """시스템 메시지 수정"""
+        try:
+            with self.conn.cursor() as cursor:
+                # admin 메시지는 admin만 수정 가능
+                cursor.execute("""
+                SELECT user_id FROM system_messages 
+                WHERE name = %s AND (user_id = %s OR user_id = 1)
+                ORDER BY user_id DESC
+                LIMIT 1
+                """, (name, user_id))
+                
+                result = cursor.fetchone()
+                
+                if not result:
+                    cursor.close()                    
+                    return False
+                
+                # admin 메시지는 복제하여 사용자 버전 생성
+                message_owner_id = result[0]
+                if message_owner_id == 1 and user_id != 1:
+                    # 기존 메시지 조회
+                    cursor.execute("""
+                    SELECT message, description FROM system_messages 
+                    WHERE name = %s AND user_id = 1
+                    """, (name,))
+                    
+                    original = cursor.fetchone()
+                    if not original:
+                        cursor.close()
+                        return False
+                    
+                    # 새 메시지 생성
+                    cursor.execute("""
+                    INSERT INTO system_messages 
+                    (name, message, description, user_id)
+                    VALUES (%s, %s, %s, %s)
+                    """, (name, 
+                        new_message if new_message else original[0], 
+                        new_description if new_description is not None else original[1], 
+                        user_id))
+                else:
+                    # 자신의 메시지 수정
+                    if new_description is not None:
+                        cursor.execute("""
+                        UPDATE system_messages
+                        SET message = %s, description = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE name = %s AND user_id = %s
+                        """, (new_message, new_description, name, user_id))
+                    else:
+                        cursor.execute("""
+                        UPDATE system_messages
+                        SET message = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE name = %s AND user_id = %s
+                        """, (new_message, name, user_id))
+                
+                self.conn.commit()
+                cursor.close()
+                
+                logging.info(f"메시지 '{name}' 수정 완료 (사용자 {user_id})")
+                return True
+            
+        except Exception as e:
+            self.conn.rollback()
+            logging.error(f"메시지 수정 오류: {str(e)}")
+            return False
+            
+    def delete_system_message(self, name: str, user_id: int) -> bool:
+        """시스템 메시지 삭제"""
+        try:
+            # admin의 기본 메시지는 삭제 불가
+            if name == "default" and user_id == 1:
+                return False
+                
+            with self.conn.cursor() as cursor:
+            
+                # 자신의 메시지만 삭제 가능
+                cursor.execute("""
+                DELETE FROM system_messages
+                WHERE name = %s AND user_id = %s
+                RETURNING id
+                """, (name, user_id))
+                
+                result = cursor.fetchone()
+                
+                self.conn.commit()
+                cursor.close()                
+                
+                if result:
+                    logging.info(f"메시지 '{name}' 삭제 완료 (사용자 {user_id})")
+                    return True
+                return False
+            
+        except Exception as e:
+            self.conn.rollback()
+            logging.error(f"메시지 삭제 오류: {str(e)}")
+            return False
+    
+    def save_selected_message(self, selected_message: str, user_id: int) -> bool:
+        """선택된 메시지 저장"""
+        try:
+            with self.conn.cursor() as cursor:
+            
+                # 기존 선택 항목이 있는지 확인
+                cursor.execute("""
+                SELECT user_id FROM user_selected_messages
+                WHERE user_id = %s
+                """, (user_id,))
+                
+                if cursor.fetchone():
+                    # 업데이트
+                    cursor.execute("""
+                    UPDATE user_selected_messages
+                    SET message_name = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s
+                    """, (selected_message, user_id))
+                else:
+                    # 새로 생성
+                    cursor.execute("""
+                    INSERT INTO user_selected_messages (user_id, message_name)
+                    VALUES (%s, %s)
+                    """, (user_id, selected_message))
+                
+                self.conn.commit()
+                cursor.close()
+                
+                
+                logging.info(f"사용자 {user_id}의 선택 메시지를 '{selected_message}'로 설정")
+                return True
+            
+        except Exception as e:
+            self.conn.rollback()
+            logging.error(f"선택 메시지 저장 오류: {str(e)}")            
+            return False
     
     def extract_text_from_file(self, file, file_name):
         return self.extractor.extract_text_from_file(file, file_name)
@@ -2486,9 +2943,7 @@ class PostgresDbManager:
                     [전체 개요]
                                        
                     [주요 항목]
-                    
-
-     
+                         
 
                     """,
                     input_variables=["text"],
