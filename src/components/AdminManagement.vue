@@ -32,9 +32,9 @@
 </template>
 
 <script>
-import { ref, shallowRef, defineAsyncComponent, onMounted } from 'vue'
+import { ref, shallowRef, computed, defineAsyncComponent, onMounted } from 'vue'
 import axios from 'axios'
-const API_BASE_URL = 'http://localhost:5001'
+import { useStore} from 'vuex';
 
 export default {
   name: 'AdminManagement',
@@ -45,6 +45,8 @@ export default {
     const currentTab = ref('users')
     const currentComponent = shallowRef(null)
     const users = ref([])
+    const store = useStore();
+    const apiBaseUrl = computed(() => store.getters.getApiBaseUrl);
 
     // 탭 정의
     const tabs = [
@@ -73,7 +75,7 @@ export default {
       try {
         const token = sessionStorage.getItem('token')  
 
-        const usersResponse = await axios.get(`${API_BASE_URL}/api/auth/list`, {
+        const usersResponse = await axios.get(`${apiBaseUrl.value}/api/auth/list`, {
           headers: {
             'Authorization': `Bearer ${token}`,
             'Content-Type': 'application/json'

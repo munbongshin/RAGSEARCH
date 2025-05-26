@@ -50,21 +50,24 @@
   </template>
   
   <script>
-  import { ref } from 'vue'
+  import { ref,computed} from 'vue'
   import axios from 'axios'
-  
-  const API_BASE_URL = 'http://localhost:5001'
-  
+  import { useStore} from 'vuex';
+
+
+
   export default {
     name: 'ChangePassword',
     emits: ['close', 'password-changed'],
-  
     setup(props, { emit }) {
       const form = ref({
         currentPassword: '',
         newPassword: '',
         confirmPassword: ''
       })
+
+      const store = useStore();
+      const apiBaseUrl = computed(() => store.getters.getApiBaseUrl);
       
       const error = ref('')
       const success = ref('')
@@ -85,7 +88,7 @@
           isLoading.value = true
           error.value = ''
   
-          await axios.post(`${API_BASE_URL}/api/auth/change-password`, {
+          await axios.post(`${apiBaseUrl.value}/api/auth/change-password`, {
             currentPassword: form.value.currentPassword,
             newPassword: form.value.newPassword
           })
@@ -109,6 +112,7 @@
         error,
         success,
         isLoading,
+        apiBaseUrl,
         changePassword
       }
     }

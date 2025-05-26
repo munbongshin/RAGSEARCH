@@ -1,5 +1,8 @@
 <template>  
   <div class="ragchat-container">
+    <div v-if="isLoading" class="global-loading-overlay">
+      <div class="progress-bar"></div>
+    </div>
     <div class="main-content">
       <aside :class="['sidebar', { 'collapsed': isSidebarCollapsed }]">
         <div class="sidebar-content" v-show="!isSidebarCollapsed">
@@ -125,7 +128,6 @@
 
 <script>
 import { ref, computed, defineComponent, watch, nextTick} from 'vue';
-import { useStore } from 'vuex';
 import axios from 'axios';
 import ChatView from './ChatView.vue';
 import DbView from './DbView.vue';
@@ -133,8 +135,100 @@ import LlmView from './LlmView.vue';
 import DocSimilarity from './DocSimilarity.vue';
 import ChatMessages from './ChatMessages.vue';
 import SystemMessage from './SystemMessage.vue';
+import { marked } from 'marked'
+import { useStore} from 'vuex';
 
-const API_BASE_URL = 'http://localhost:5001';
+
+
+function formatContent(content) {
+  if (!content) return '';
+  
+  try {
+    let text = typeof content === 'object' ? JSON.stringify(content) : String(content);
+    
+    // 1. 기본 텍스트 정리
+    text = text
+      // 특수문자 정리
+      .replace(/[•]/g, '-')
+      .replace(/∼/g, '-')
+      // 불필요한 공백 제거
+      .replace(/\s+/g, ' ')
+      // 줄바꿈 정규화
+      .replace(/\n\s*\n/g, '\n');
+
+    // 2. 헤더 포맷팅 (모든 헤더에 대해 한 줄바꿈 및 간격 조정)
+    text = text.replace(/^(#{2,})\s*([^\n]+)/gm, (match, hashes, content) => {
+      return `\n${hashes} ${content.trim()}\n`;
+    });
+
+    // 3. 테이블 정리 및 구조화
+    text = text.replace(/\|[^\n]+\|/g, (match) => {
+      const cells = match.split('|')
+        .map(cell => cell.trim())
+        .filter(cell => cell !== '');
+      
+      // 첫 번째 줄이면 구분선 추가
+      if (cells.length > 0) {
+        const separatorLine = cells.map(() => '---').join('|');
+        return `| ${cells.join(' | ')} |\n| ${separatorLine} |`;
+      }
+      
+      return match;
+    });
+
+    // 4. 구조적 정리
+    text = text
+      // 목록 항목 포맷팅
+      .replace(/^[-•]\s*([^\n]+)/gm, '- $1')
+      // 시간 포맷팅
+      .replace(/(\d{2})[-∼](\d{2})/g, '$1:00-$2:00')
+      // 괄호 내용 정리
+      .replace(/\(\s*([^)]+)\s*\)/g, '($1)')
+      // 연속된 공백 줄 제거
+      .replace(/\n{3,}/g, '\n\n');
+
+    // 5. 최종 정리
+    return text
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line !== '')
+      .join('\n')
+      .trim();
+
+  } catch (error) {
+    console.error('Content formatting error:', error);
+    return String(content);
+  }
+}
+
+// 안전한 마크다운 파싱
+function safeMarkdownParse(content) {
+  if (!content) return '';
+
+  try {
+    const formattedContent = formatContent(content);
+    
+    marked.setOptions({
+      breaks: true,         // \n을 <br>로 변환
+      gfm: true,           // GitHub Flavored Markdown 활성화
+      headerIds: false,     // 헤더 ID 비활성화
+      mangle: false,       // 이메일 주소 변환 방지
+      smartypants: true,   // 스마트 문장 부호 변환
+      tables: true,        // 테이블 지원
+      xhtml: true,         // XHTML 스타일 태그
+      pedantic: false,     // 엄격하지 않은 마크다운 처리
+      sanitize: false      // HTML 허용
+    });
+    
+    return marked.parse(formattedContent);
+  } catch (error) {
+    console.error('Markdown parsing error:', error);
+    return '';
+  }
+}
+
+export { safeMarkdownParse, formatContent };
+
 
 export default defineComponent({
   name: 'RagChat',
@@ -146,6 +240,7 @@ export default defineComponent({
     ChatMessages,
     SystemMessage
   },
+
   setup() {
     const store = useStore();
     const currentView = ref('chat');
@@ -162,6 +257,7 @@ export default defineComponent({
     const selectedDocs = ref(new Set());
     const isResizing = ref(false);
     const chatMessagesHeight = ref('60%'); // 초기 높이
+    const apiBaseUrl = computed(() => store.getters.getApiBaseUrl); 
 
     const startResize = (event) => {
       event.preventDefault();
@@ -409,10 +505,18 @@ export default defineComponent({
               ) 
           : [];
 
-        console.log('Sending sources:', sources);
-
-        const response = await axios.post(`${API_BASE_URL}/api/process_query`, {
+          console.log('Vuex 스토어 상태:', store.state);
+          console.log('현재 시스템 메시지:', store.getters.getCurrentSystemMessage);
+          
+          const currentSystemMessage = store.getters.getCurrentSystemMessage;
+          
+          console.log('currentSystemMessage 타입:', typeof currentSystemMessage);
+          console.log('currentSystemMessage 값:', currentSystemMessage);
+        const response = await axios.post(`${apiBaseUrl.value}/api/process_query`, {
           query: query,
+          system_message: currentSystemMessage && currentSystemMessage.message 
+            ? currentSystemMessage.message 
+            : null,
           collections: collections,
           llm_name: currentLlmSource.value,
           llm_model: currentLlmModel.value,
@@ -468,7 +572,7 @@ export default defineComponent({
     });
 
     const summarizeSelectedDocs = async () => {
-      if (!hasSelectedDocs.value) return;
+      if (!hasSelectedDocs.value || isLoading.value) return;
 
       const lineValue = parseFloat(isLine_threshold.value);
       if (isNaN(lineValue) || lineValue < 0 || lineValue > 30) {
@@ -479,6 +583,8 @@ export default defineComponent({
         return;
       }
 
+      isLoading.value = true; // Start loading
+
       const selectedDocsList = Array.from(selectedDocs.value).map(docKey => {
         return docsList.value.find(doc => 
           `${doc.title}-${doc.page}` === docKey
@@ -486,6 +592,7 @@ export default defineComponent({
       }).filter(Boolean);
 
       if (selectedDocsList.length === 0) {
+        isLoading.value = false;
         return;
       }
 
@@ -497,7 +604,7 @@ export default defineComponent({
       });
 
       try {
-        const response = await axios.post(`${API_BASE_URL}/api/summarize-selectdocs`, {
+        const response = await axios.post(`${apiBaseUrl.value}/api/summarize-selectdocs`, {
           documents: selectedContents,
           lines: lineValue,
           llm_name: currentLlmSource.value,
@@ -507,10 +614,8 @@ export default defineComponent({
         if (response.data.success) {
           chatMessages.value.push({
             role: 'Assistant',
-            content: `📝 선택된 문서 요약:\n\n${response.data.result}`
+            content: `📝 선택된 문서 요약:\n\n${safeMarkdownParse(response.data.result)}`
           });
-          
-          //selectedDocs.value.clear();
         } else {
           throw new Error(response.data.error || '요약 생성에 실패했습니다.');
         }
@@ -536,6 +641,8 @@ export default defineComponent({
             content: error.message
           });
         }
+      } finally {
+        isLoading.value = false; // Stop loading when done
       }
     };
 
@@ -572,6 +679,7 @@ export default defineComponent({
       summarizeSelectedDocs,
       chatMessagesHeight,
       startResize,
+      apiBaseUrl,
       stopResize
     };
   }
@@ -593,6 +701,20 @@ export default defineComponent({
   font-size: 15px;
   margin: 0;
   padding: 0;
+}
+
+.global-loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  z-index: 9999;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  cursor: not-allowed;
 }
 
 .main-content {

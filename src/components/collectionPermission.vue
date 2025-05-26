@@ -48,7 +48,7 @@
                       <label class="checkbox-container">
                         <input type="checkbox" 
                               :checked="isUserGroupSelected(group)"
-                              @change="toggleUserGroupSelection(group)">
+                              @click="toggleUserGroupSelection(group)">
                         <span class="checkmark"></span>
                       </label>
                     </div>
@@ -103,13 +103,13 @@
       <div class="button-group">
         <button 
           @click="moveUp" 
-          :disabled="!selectedCollection || selectedAvailableGroups.length === 0"
+          :disabled="!selectedCollection || !hasSelectedAvailableGroups"
           class="action-button">
           위로
         </button>
         <button 
           @click="moveDown" 
-          :disabled="!selectedCollection || selectedUserGroups.length === 0"
+          :disabled="!selectedCollection || !hasSelectedUserGroups"
           class="action-button">
           아래로
         </button>
@@ -134,7 +134,7 @@
                   <label class="checkbox-container">
                     <input type="checkbox" 
                            :checked="isAvailableGroupSelected(group)"
-                           @change="toggleAvailableGroupSelection(group)"
+                           @click="toggleAvailableGroupSelection(group)"
                            :disabled="!selectedCollection">
                     <span class="checkmark"></span>
                   </label>
@@ -169,12 +169,20 @@ export default {
     const availableGroups = ref([]);
     const isLoading = ref(false);
     const originalUserGroups = ref([]);
-    const userGroupsState = ref([]);
-    const availableGroupsState = ref([]);
-    const authContext = inject('authContext')
+    const authContext = inject('authContext');
 
-    const selectedAvailableGroups = computed(() => availableGroupsState.value);
-    const selectedUserGroups = computed(() => userGroupsState.value);
+    // 체크 상태를 별도로 관리하는 Map 사용
+    const userGroupCheckedMap = ref(new Map());
+    const availableGroupCheckedMap = ref(new Map());
+
+    // 선택된 그룹 확인을 위한 computed 속성
+    const hasSelectedUserGroups = computed(() => {
+      return userGroups.value.some(group => userGroupCheckedMap.value.get(group.id) === true);
+    });
+
+    const hasSelectedAvailableGroups = computed(() => {
+      return availableGroups.value.some(group => availableGroupCheckedMap.value.get(group.id) === true);
+    });
 
     const hasChanges = computed(() => {
       if (!originalUserGroups.value.length && !userGroups.value.length) return false;
@@ -203,20 +211,20 @@ export default {
 
     const loadCollections = async () => {
       try {
-        const username = authContext.value.username
-        console.log('Fetching collections for username:', username)
+        const username = authContext.value.username;
+        console.log('Fetching collections for username:', username);
 
         const userResponse = await axios.get(`${API_BASE_URL}/api/user/id`, {
           params: { username }
-        })
+        });
 
-        console.log('User ID response:', userResponse.data)
-        const userId = userResponse.data.user_id
+        console.log('User ID response:', userResponse.data);
+        const userId = userResponse.data.user_id;
 
         const response = await axios.get(`${API_BASE_URL}/api/collections`, {
           params: { user_id: userId },
           headers: { 'Content-Type': 'application/json' }
-        })
+        });
         
         if (response.data.success) {
           collections.value = response.data.collections.map(collection => ({
@@ -235,8 +243,9 @@ export default {
 
     const selectCollection = async (collectionId) => {
       selectedCollection.value = collectionId;
-      userGroupsState.value = [];
-      availableGroupsState.value = [];
+      // 체크 상태 초기화
+      userGroupCheckedMap.value = new Map();
+      availableGroupCheckedMap.value = new Map();
       await loadCollectionGroups(collectionId);
     };
 
@@ -320,44 +329,66 @@ export default {
       }
     };
 
+    // 체크 상태 확인 함수
     const isUserGroupSelected = (group) => {
-      return userGroupsState.value.some(g => g.id === group.id);
+      return userGroupCheckedMap.value.get(group.id) === true;
     };
 
     const isAvailableGroupSelected = (group) => {
-      return availableGroupsState.value.some(g => g.id === group.id);
+      return availableGroupCheckedMap.value.get(group.id) === true;
     };
 
+    // 체크박스 토글 함수
     const toggleUserGroupSelection = (group) => {
-      const index = userGroupsState.value.findIndex(g => g.id === group.id);
+      // 현재 상태 가져오기
+      const isCurrentlyChecked = userGroupCheckedMap.value.get(group.id) === true;
       
-      if (index !== -1) {
-        userGroupsState.value = userGroupsState.value.filter(g => g.id !== group.id);
-      } else {
-        userGroupsState.value.push({ ...group });
-      }
+      // 새 Map 인스턴스 생성하여 반응성 보장
+      const newMap = new Map(userGroupCheckedMap.value);
+      
+      // 상태 토글
+      newMap.set(group.id, !isCurrentlyChecked);
+      
+      // 반응형 변수 업데이트
+      userGroupCheckedMap.value = newMap;
+      
+      console.log(`그룹 ${group.id} 선택 상태: ${!isCurrentlyChecked}`);
     };
 
     const toggleAvailableGroupSelection = (group) => {
-      const index = availableGroupsState.value.findIndex(g => g.id === group.id);
+      // 현재 상태 가져오기
+      const isCurrentlyChecked = availableGroupCheckedMap.value.get(group.id) === true;
       
-      if (index !== -1) {
-        availableGroupsState.value = availableGroupsState.value.filter(g => g.id !== group.id);
-      } else {
-        availableGroupsState.value.push({ ...group });
-      }
+      // 새 Map 인스턴스 생성하여 반응성 보장
+      const newMap = new Map(availableGroupCheckedMap.value);
+      
+      // 상태 토글
+      newMap.set(group.id, !isCurrentlyChecked);
+      
+      // 반응형 변수 업데이트
+      availableGroupCheckedMap.value = newMap;
+      
+      console.log(`이용자 그룹 ${group.id} 선택 상태: ${!isCurrentlyChecked}`);
     };
 
     const moveUp = () => {
       try {
-        if (!selectedCollection.value || selectedAvailableGroups.value.length === 0) return;
+        if (!selectedCollection.value) return;
+        
+        // 체크된 그룹 가져오기
+        const selectedGroups = availableGroups.value.filter(group => 
+          availableGroupCheckedMap.value.get(group.id) === true
+        );
+        
+        if (selectedGroups.length === 0) return;
         
         // 선택된 사용 가능한 그룹들을 userGroups에 추가
         const updatedUserGroups = [...userGroups.value];
-        selectedAvailableGroups.value.forEach(group => {
+        
+        selectedGroups.forEach(group => {
           if (!updatedUserGroups.some(g => g.id === group.id)) {
             updatedUserGroups.push({
-              ...group,
+              ...JSON.parse(JSON.stringify(group)),
               permissions: {
                 read: true,
                 write: false,
@@ -372,11 +403,11 @@ export default {
         
         // availableGroups에서 선택된 그룹들 제거
         availableGroups.value = availableGroups.value.filter(
-          group => !selectedAvailableGroups.value.some(g => g.id === group.id)
+          group => availableGroupCheckedMap.value.get(group.id) !== true
         );
         
-        // 선택 상태 초기화
-        availableGroupsState.value = [];
+        // 체크 상태 초기화
+        availableGroupCheckedMap.value = new Map();
       } catch (error) {
         console.error('이동 실패:', error);
         alert(error.response?.data?.message || '이동에 실패했습니다.');
@@ -385,10 +416,17 @@ export default {
 
     const moveDown = () => {
       try {
-        if (!selectedCollection.value || selectedUserGroups.value.length === 0) return;
+        if (!selectedCollection.value) return;
+        
+        // 체크된 그룹 가져오기
+        const selectedGroups = userGroups.value.filter(group => 
+          userGroupCheckedMap.value.get(group.id) === true
+        );
+        
+        if (selectedGroups.length === 0) return;
         
         // 선택된 그룹들을 availableGroups로 이동
-        const movedGroups = selectedUserGroups.value.map(group => ({
+        const movedGroups = selectedGroups.map(group => ({
           id: group.id,
           name: group.name,
           description: group.description
@@ -398,11 +436,11 @@ export default {
         
         // userGroups에서 선택된 그룹들 제거
         userGroups.value = userGroups.value.filter(
-          group => !selectedUserGroups.value.some(g => g.id === group.id)
+          group => userGroupCheckedMap.value.get(group.id) !== true
         );
         
-        // 선택 상태 초기화
-        userGroupsState.value = [];
+        // 체크 상태 초기화
+        userGroupCheckedMap.value = new Map();
       } catch (error) {
         console.error('이동 실패:', error);
         alert(error.response?.data?.message || '이동에 실패했습니다.');
@@ -480,13 +518,14 @@ export default {
           // 그룹의 권한이 변경되었음을 표시하기 위해 userGroups 상태 업데이트
           const updatedGroups = [...userGroups.value];
           updatedGroups[index] = {
-            ...group,
+            ...updatedGroups[index],
             permissions: {
               read: group.permissions.read,
               write: group.permissions.write,
               delete: group.permissions.delete
             }
           };
+          // 새 배열 참조로 업데이트하여 반응성 보장
           userGroups.value = updatedGroups;
           
           console.log('권한 업데이트됨:', {
@@ -510,6 +549,8 @@ export default {
       availableGroups,
       hasChanges,
       isLoading,
+      hasSelectedUserGroups,
+      hasSelectedAvailableGroups,
       selectCollection,
       isUserGroupSelected,
       isAvailableGroupSelected,
@@ -518,8 +559,6 @@ export default {
       moveUp,
       moveDown,
       saveGroups,
-      selectedAvailableGroups,
-      selectedUserGroups,
       updatePermissions
     };
   }

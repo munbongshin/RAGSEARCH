@@ -61,8 +61,10 @@
  
  <script>
  import axios from 'axios';
- 
- const API_BASE_URL = 'http://localhost:5001';
+ import {computed } from 'vue';
+import { useStore} from 'vuex';
+
+
  
  export default {
   name: 'DocSimilarity',
@@ -74,6 +76,15 @@
     llmName: String,
     llmModel: String
   },
+  setup() {
+    const store = useStore();
+    const apiBaseUrl = computed(() => store.getters.getApiBaseUrl);
+    
+    return {
+      apiBaseUrl
+    };
+  },
+
   data() {
     return {
       originalDoc: '',
@@ -92,7 +103,7 @@
       
       this.isLoading = true;
       try {
-        const response = await axios.post(`${API_BASE_URL}/api/compare-documents`, {
+        const response = await axios.post(`${this.apiBaseUrl.value}/api/compare-documents`, {
           collection_name: this.collectionName,
           sources: this.selectedSources,
           llm_name: this.llmName,

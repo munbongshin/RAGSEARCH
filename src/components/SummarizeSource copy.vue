@@ -32,8 +32,9 @@
 import { ref, onUnmounted, computed } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
+import { useStore} from 'vuex';
 
-const API_BASE_URL = 'http://localhost:5001'
+
 
 export default {
   props: {
@@ -54,7 +55,8 @@ export default {
       required: true
     }
   },
-  
+
+
   setup(props) {
     const isLoading = ref(false)
     const summary = ref('')
@@ -62,6 +64,8 @@ export default {
     const error = ref('')
     const currentDocument = ref('')
     let eventSource = null
+    const store = useStore();
+    const apiBaseUrl = computed(() => store.getters.getApiBaseUrl);
 
     const renderedSummary = computed(() => {
       return DOMPurify.sanitize(marked(summary.value))
@@ -123,7 +127,7 @@ export default {
           llm_model: props.llmModel
         })
 
-        eventSource = new EventSource(`${API_BASE_URL}/api/summarize-sse?${params}`)
+        eventSource = new EventSource(`${apiBaseUrl.value}/api/summarize-sse?${params}`)
 
         eventSource.onmessage = (event) => processStreamData(event.data)
 

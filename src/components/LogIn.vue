@@ -97,42 +97,14 @@
 </template>
 
 <script>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import axios from 'axios'
-
-const API_BASE_URL = 'http://localhost:5001'
-
-// axios 기본 설정
-axios.defaults.baseURL = API_BASE_URL
-axios.defaults.withCredentials = true
-axios.defaults.headers.common['Content-Type'] = 'application/json'
-axios.defaults.headers.common['Accept'] = 'application/json'
-
-// axios 인터셉터 설정
-axios.interceptors.request.use(config => {
-  const token = sessionStorage.getItem('token')
-  if (token) {
-      config.headers.Authorization = `Bearer ${token}`
-  }
-  return config
-})
-
-axios.interceptors.response.use(
-  response => response,
-  error => {
-      if (error.response?.status === 401) {
-          sessionStorage.removeItem('token')
-          sessionStorage.removeItem('username')
-          sessionStorage.removeItem('user_id')
-      }
-      return Promise.reject(error)
-  }
-)
+import { useStore } from 'vuex';
 
 export default {
   name: 'LogIn',
   emits: ['login-success'],
-  
+ 
   setup(props, { emit }) {
       const currentView = ref('login')
       const error = ref('')
@@ -143,13 +115,40 @@ export default {
           password: '',
           rememberMe: false
       })
-      
+      const store = useStore();
+      const apiBaseUrl = computed(() => store.getters.getApiBaseUrl); 
       const registerForm = ref({
           username: '',
           email: '',
           password: '',
           confirmPassword: ''
       })
+
+      // axios 기본 설정을 setup 내부로 이동
+      axios.defaults.withCredentials = true
+      axios.defaults.headers.common['Content-Type'] = 'application/json'
+      axios.defaults.headers.common['Accept'] = 'application/json'
+
+      // axios 인터셉터 설정도 setup 내부에 배치
+      axios.interceptors.request.use(config => {
+        const token = sessionStorage.getItem('token')
+        if (token) {
+            config.headers.Authorization = `Bearer ${token}`
+        }
+        return config
+      })
+
+      axios.interceptors.response.use(
+        response => response,
+        error => {
+            if (error.response?.status === 401) {
+                sessionStorage.removeItem('token')
+                sessionStorage.removeItem('username')
+                sessionStorage.removeItem('user_id')
+            }
+            return Promise.reject(error)
+        }
+      )
 
       const getErrorMessage = (errorCode, message) => {
           switch (errorCode) {
@@ -175,7 +174,7 @@ export default {
           try {
               isLoading.value = true
               error.value = ''
-              const response = await axios.post(`${API_BASE_URL}/api/auth/login`, {
+              const response = await axios.post(`${apiBaseUrl.value}/api/auth/login`, {
                   username: loginForm.value.username,
                   password: loginForm.value.password,
                   remember_me: loginForm.value.rememberMe
@@ -210,7 +209,7 @@ export default {
           try {
               isLoading.value = true
               error.value = ''
-              await axios.post(`${API_BASE_URL}/api/auth/register`, {
+              await axios.post(`${apiBaseUrl.value}/api/auth/register`, {
                   username: registerForm.value.username,
                   email: registerForm.value.email,
                   password: registerForm.value.password
@@ -240,7 +239,8 @@ export default {
           loginForm,
           registerForm,
           login,
-          register
+          register,
+          apiBaseUrl // 이제 apiBaseUrl을 반환하여 템플릿에서 접근 가능
       }
   }
 }

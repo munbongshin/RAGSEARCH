@@ -115,8 +115,8 @@
 <script>
 import { ref, computed, onMounted, watch } from 'vue'
 import axios from 'axios'
+import { useStore} from 'vuex';
 
-const API_BASE_URL = 'http://localhost:5001'
 
 export default {
   name: 'UserManagement',
@@ -132,6 +132,8 @@ export default {
     const totalUserCount = ref(0)
     const activeUserCount = ref(0)
     const groups = ref({})
+    const store = useStore();
+    const apiBaseUrl = computed(() => store.getters.getApiBaseUrl);
     
 
     // 전체 선택 상태 계산
@@ -180,7 +182,7 @@ export default {
         loading.value = true
         const token = sessionStorage.getItem('token')
         
-        const response = await axios.get(`${API_BASE_URL}/api/auth/list`, { 
+        const response = await axios.get(`${apiBaseUrl.value}/api/auth/list`, { 
           headers: {
             'Authorization': `Bearer ${token}`,
           },
@@ -221,7 +223,7 @@ export default {
     const loadGroups = async () => {
       try {
         const token = sessionStorage.getItem('token')
-        const response = await axios.get(`${API_BASE_URL}/api/auth/groups`, {
+        const response = await axios.get(`${apiBaseUrl.value}/api/auth/groups`, {
           headers: {
             'Authorization': `Bearer ${token}`
           },
@@ -248,7 +250,7 @@ export default {
       try {
         const token = sessionStorage.getItem('token')
         const response = await axios.post(
-          `${API_BASE_URL}/api/auth/update-status`,
+          `${apiBaseUrl.value}/api/auth/update-status`,
           {
             user_ids: userIds,
             is_active: isActive
@@ -280,7 +282,7 @@ export default {
       try {
         const token = sessionStorage.getItem('token')
         const response = await axios.post(
-          `${API_BASE_URL}/api/auth/bulk-update`,
+          `${apiBaseUrl.value}/api/auth/bulk-update`,
           { is_active: isActive },
           { 
             headers: {

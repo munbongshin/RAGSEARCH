@@ -67,13 +67,12 @@
           </tr>
           <tr v-for="group in groups" :key="group.id">
             <td><input 
-                  type="checkbox" 
-                  :checked="isSelected(group.id)" 
-                  @change="event => handleSelect(group.id, event)"
-                  :disabled="currentFunction === 'edit' || currentFunction === 'list'"
-                  :class="{ 'checked-mode': currentFunction === 'delete' }"
-                  >
-            </td>
+                type="checkbox" 
+                :checked="isSelected(group.id)" 
+                @change="event => handleSelect(group.id, event)"
+                :class="{ 'checked-mode': currentFunction === 'delete' }"
+              >
+          </td>
             
             <td>{{ group.id }}</td>
             <td @click="startEditing(group.id, 'name')" class="editable-cell">
@@ -130,11 +129,12 @@
 <script>
 import { ref, computed, nextTick, onMounted } from 'vue'
 import axios from 'axios'
+import { useStore} from 'vuex';
 
-const API_BASE_URL = 'http://localhost:5001'
 
 export default {
   name: 'GroupsManagement',
+
   setup() {
     const isLoading = ref(false)
     const currentFunction = ref('list')
@@ -146,6 +146,9 @@ export default {
       name: '',
       description: ''
     })
+
+    const store = useStore();
+    const apiBaseUrl = computed(() => store.getters.getApiBaseUrl); 
 
     const tabs = [
       { id: 'list', name: '조회' },
@@ -162,7 +165,7 @@ export default {
           throw new Error('인증 토큰이 없습니다.')
         }
 
-        const response = await axios.get(`${API_BASE_URL}/api/auth/groups`, {
+        const response = await axios.get(`${apiBaseUrl.value}/api/auth/groups`, {
           headers: {
             'Authorization': `Bearer ${token}`,
             'Content-Type': 'application/json'
@@ -213,7 +216,7 @@ export default {
     })
 
     const isSelected = (groupId) => {
-      return selectedGroups.value.includes(groupId)
+      return selectedGroups.value.includes(groupId);
     }
 
     const handleSelectAll = (event) => {
@@ -225,10 +228,15 @@ export default {
     }
 
     const handleSelect = (groupId, event) => {
-      if (event.target.checked) {
-        selectedGroups.value = [...selectedGroups.value, groupId]
+      const isChecked = event.target.checked;
+      if (isChecked) {
+        // 그룹 ID가 이미 선택되어 있지 않다면 추가
+        if (!selectedGroups.value.includes(groupId)) {
+          selectedGroups.value.push(groupId);
+        }
       } else {
-        selectedGroups.value = selectedGroups.value.filter(id => id !== groupId)
+        // 그룹 ID를 선택 해제
+        selectedGroups.value = selectedGroups.value.filter(id => id !== groupId);
       }
     }
 
@@ -245,20 +253,26 @@ export default {
     }
 
     const handleAddSubmit = async () => {
-      if (!newGroup.value.name.trim()) {
+      const token = sessionStorage.getItem('token')
+      if (!token) {
+          throw new Error('인증 토큰이 없습니다.')
+        }
+      
+      // 입력된 그룹명과 설명 trim
+      const trimmedName = newGroup.value.name.trim();
+      const trimmedDescription = newGroup.value.description.trim();
+
+      // 그룹명 필수 검증
+      if (!trimmedName) {
         alert('그룹명을 입력해주세요.');
-        return;
-      }
-      if (!confirm('새 그룹을 생성하시겠습니까?')) {
         return;
       }
 
       isLoading.value = true;
       try {
-        const token = sessionStorage.getItem('token');
-        const response = await axios.post(`${API_BASE_URL}/api/auth/groups/create`, {
-          name: newGroup.value.name,
-          description: newGroup.value.description
+        const response = await axios.post(`${apiBaseUrl.value}/api/auth/groups/create`, {
+          name: trimmedName,
+          description: trimmedDescription
         }, {
           headers: { 
             'Authorization': `Bearer ${token}`,
@@ -267,10 +281,12 @@ export default {
           withCredentials: true
         });
 
-        if (response.data.success) {
-          await fetchGroups();
-          cancelAdd();
-          alert(response.data.message || '그룹이 생성되었습니다.');
+        if (response.data && response.data.success) {
+          await fetchGroups(); // 그룹 목록 갱신
+          cancelAdd(); // 추가 모드 해제
+          alert('그룹이 성공적으로 생성되었습니다.');
+        } else {
+          throw new Error(response.data.message || '그룹 생성에 실패했습니다.');
         }
       } catch (error) {
         handleError(error);
@@ -311,7 +327,7 @@ export default {
           [editingCell.value.field]: editingCell.value.value
         };
 
-        const response = await axios.post(`${API_BASE_URL}/api/auth/groups/update`, 
+        const response = await axios.post(`${apiBaseUrl.value}/api/auth/groups/update`, 
           updatedData,
           {
             headers: { 
@@ -343,7 +359,7 @@ export default {
       isLoading.value = true;
       try {
         const token = sessionStorage.getItem('token');
-        const response = await axios.post(`${API_BASE_URL}/api/auth/groups/delete`, {
+        const response = await axios.post(`${apiBaseUrl.value}/api/auth/groups/delete`, {
           group_id: group.id
         }, {
           headers: { 'Authorization': `Bearer ${token}` },
@@ -370,7 +386,7 @@ export default {
       try {
         const token = sessionStorage.getItem('token');
         const promises = selectedGroups.value.map(groupId => 
-          axios.post(`${API_BASE_URL}/api/auth/groups/delete`, {
+          axios.post(`${apiBaseUrl.value}/api/auth/groups/delete`, {
             group_id: groupId
           }, {
             headers: { 'Authorization': `Bearer ${token}` },

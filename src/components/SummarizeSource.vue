@@ -200,30 +200,24 @@
 </template>
 
 <script>
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useStore } from 'vuex'
+import axios from 'axios'
 import { marked } from 'marked'
-import axios from 'axios';
 
 function formatContent(content) {
   if (!content) return '';
   
   try {
-    // 1. 문자열로 변환
     const text = typeof content === 'object' ? JSON.stringify(content) : String(content);
     
-    // 2. 마크다운 형식으로 변환
     let markdownContent = text
-      // 연속된 줄바꿈 유지 (2줄까지만)
       .replace(/\n{3,}/g, '\n\n')
-      // 머리글 스타일링
       .replace(/^(\d+)\.\s*(.+)$/gm, '**$1. $2**')
-      // 콜론으로 시작하는 줄 강조
       .replace(/^(.+):$/gm, '**$1:**')
-      // 불필요한 앞뒤 공백만 제거
       .trim();
     
-    // 3. 긴 문단 보존
-    const paragraphs = markdownContent.split('\n\n');
-    return paragraphs.join('\n\n');
+    return markdownContent;
   } catch (error) {
     console.error('Content formatting error:', error);
     return String(content);
@@ -236,18 +230,16 @@ function safeMarkdownParse(content) {
   try {
     const formattedContent = formatContent(content);
     
-    // marked 옵션 수정
     marked.setOptions({
-      breaks: true,        // \n을 <br>로 변환
-      gfm: true,          // GitHub Flavored Markdown 활성화
-      headerIds: false,    // 헤더 ID 비활성화
-      sanitize: false,     // XSS는 다른 방법으로 처리
-      mangle: false,      // 이메일 주소 변환 방지
-      headerPrefix: '',    // 헤더 접두사 제거
-      smartypants: true    // 더 나은 문자 렌더링
+      breaks: true,
+      gfm: true,
+      headerIds: false,
+      sanitize: false,
+      mangle: false,
+      headerPrefix: '',
+      smartypants: true
     });
     
-    // XSS 방지를 위한 기본적인 이스케이프 처리
     const escaped = formattedContent
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
@@ -265,8 +257,6 @@ function safeMarkdownParse(content) {
 export { safeMarkdownParse, formatContent };
 
 export default {
-  name: 'SummarizeSource',
-  
   props: {
     selectedCollectionsSources: {
       type: Object,
@@ -286,33 +276,33 @@ export default {
     }
   },
 
-  data() {
-    return {
-      API_BASE_URL: 'http://localhost:5001',
-      eventSource: null,
-      selectedSource: null,
-      currentPage: 1,
-      isLoading: false,
-      summary: '',
-      page_content: '',
-      progress: 0,
-      error: '',
-      currentDocument: '',
-      topSummary: '',
-      currentPageDetail: '',
-      pages: [],
-      isPanelCollapsed: false,
-      windowWidth: window.innerWidth,
-      sidebarWidth: 280,
-      panelWidth: 400,
-      isExpanded: false,
-      hasOverflow: false
-    }
-  },
+  setup(props) {
+    const store = useStore()
+    const API_BASE_URL = computed(() => store.getters.getApiBaseUrl)
 
-  computed: {
-    containerStyle() {
-      const summaryPanelWidth = this.isPanelCollapsed ? 40 : this.panelWidth;
+    // Reactive state
+    const eventSource = ref(null)
+    const selectedSource = ref(null)
+    const currentPage = ref(1)
+    const isLoading = ref(false)
+    const summary = ref('')
+    const page_content = ref('')
+    const progress = ref(0)
+    const error = ref('')
+    const currentDocument = ref('')
+    const topSummary = ref('')
+    const currentPageDetail = ref('')
+    const pages = ref([1])
+    const isPanelCollapsed = ref(false)
+    const windowWidth = ref(window.innerWidth)
+    const sidebarWidth = ref(280)
+    const panelWidth = ref(400)
+    const isExpanded = ref(false)
+    const hasOverflow = ref(false)
+
+    // Computed properties
+    const containerStyle = computed(() => {
+      const summaryPanelWidth = isPanelCollapsed.value ? 40 : panelWidth.value;
       
       return {
         display: 'flex',
@@ -320,14 +310,14 @@ export default {
         height: '100vh',
         overflow: 'hidden',
         paddingRight: `${summaryPanelWidth}px`
-      };
-    },
-    
-    centerPanelStyle() {
-      const summaryPanelWidth = this.isPanelCollapsed ? 40 : this.panelWidth;
+      }
+    })
+
+    const centerPanelStyle = computed(() => {
+      const summaryPanelWidth = isPanelCollapsed.value ? 40 : panelWidth.value;
       const centerPanelWidth = Math.max(
         500, 
-        this.windowWidth - this.sidebarWidth - summaryPanelWidth
+        windowWidth.value - sidebarWidth.value - summaryPanelWidth
       );
       
       return {
@@ -335,11 +325,11 @@ export default {
         minWidth: '500px',
         flex: '1',
         overflowY: 'auto'
-      };
-    },
+      }
+    })
 
-    sources() {
-      const { sources } = this.selectedCollectionsSources;
+    const sources = computed(() => {
+      const { sources } = props.selectedCollectionsSources;
       return sources.map(source => ({
         id: `${source.collection}-${source.source}`,
         type: source.source.split('.').pop().toLowerCase(),
@@ -348,113 +338,113 @@ export default {
         collection_id: parseInt(source.collection_id, 10),
         selected: true
       }));
-    },
+    })
 
-    selectedSources() {
-      return this.sources.filter(s => s.selected);
-    },
+    const selectedSources = computed(() => 
+      sources.value.filter(s => s.selected)
+    )
 
-    renderedPageContent() {
-      // page_content가 있으면 우선 사용
-      if (this.page_content) {
-        return safeMarkdownParse(this.page_content);
+    const renderedPageContent = computed(() => {
+      if (page_content.value) {
+        return safeMarkdownParse(page_content.value);
       }
-      // topSummary가 있으면 다음으로 사용
-      if (this.topSummary) {
-        return safeMarkdownParse(this.topSummary);
+      if (topSummary.value) {
+        return safeMarkdownParse(topSummary.value);
       }
-      // 둘 다 없으면 기본 메시지 표시
       return '선택된 문서 페이지의 내용이 여기에 표시됩니다.';
-    },
-    sourcesByCollection() {
+    })
+
+    const sourcesByCollection = computed(() => {
       const grouped = {};
-      this.sources.forEach(source => {
+      sources.value.forEach(source => {
         if (!grouped[source.collection]) {
           grouped[source.collection] = [];
         }
         grouped[source.collection].push(source);
       });
       return grouped;
-    },
+    })
 
-    totalPages() {
-      return this.pages?.length || 1;
-    },
+    const totalPages = computed(() => pages.value?.length || 1)
 
-    displayedPages() {
-      const total = this.totalPages;
-      const current = this.currentPage;
+    const displayedPages = computed(() => {
+      const total = totalPages.value;
+      const current = currentPage.value;
       const range = 5;
 
       if (total <= 1) return [1];
 
-      let start = Math.max(current - range, 1);
-      let end = Math.min(current + range, total);
+      let start = Math.max(current - Math.floor(range / 2), 1);
+      let end = Math.min(start + range - 1, total);
+
+      // Adjust start if we're near the end
+      if (end === total) {
+        start = Math.max(total - range + 1, 1);
+      }
 
       const pages = [];
 
+      // Add first page and ellipsis if needed
       if (start > 1) {
         pages.push(1);
         if (start > 2) pages.push('...');
       }
 
+      // Add page numbers in the current range
       for (let i = start; i <= end; i++) {
         pages.push(i);
       }
 
+      // Add last page and ellipsis if needed
       if (end < total) {
         if (end < total - 1) pages.push('...');
         pages.push(total);
       }
 
       return pages;
+    })
+
+    // Methods
+    const toggleExpand = () => {
+      isExpanded.value = !isExpanded.value;
     }
-  },
 
-  methods: {
-    toggleExpand() {
-      this.isExpanded = !this.isExpanded;
-    },
-    
-    checkOverflow() {
-      if (this.$refs.summaryContent) {
-        const element = this.$refs.summaryContent;
-        this.hasOverflow = element.scrollHeight > element.clientHeight;
+    const checkOverflow = () => {
+      if (document.querySelector('.summary-content')) {
+        const element = document.querySelector('.summary-content');
+        hasOverflow.value = element.scrollHeight > element.clientHeight;
       }
-    },
-    handleResize() {
-      this.windowWidth = window.innerWidth;
-    },
+    }
 
-    safeMarkdownParse(content) {
-      return safeMarkdownParse(content);
-    },
+    const handleResize = () => {
+      windowWidth.value = window.innerWidth;
+    }
 
-    toggleAllSources() {
-      const newSelected = !this.allSourcesSelected;
-      this.sources.forEach(source => {
-        source.selected = newSelected;
+    const toggleAllSources = () => {
+      const currentState = sources.value.every(s => s.selected);
+      sources.value.forEach(source => {
+        source.selected = !currentState;
       });
-    },
+    }
 
-    toggleSource(id) {
-      const source = this.sources.find(s => s.id === id);
+    const toggleSource = (id) => {
+      const source = sources.value.find(s => s.id === id);
       if (source) {
         source.selected = !source.selected;
       }
-    },
+    }
 
-    togglePanel() {
-      this.isPanelCollapsed = !this.isPanelCollapsed;
-    },
+    const togglePanel = () => {
+      isPanelCollapsed.value = !isPanelCollapsed.value;
+    }
 
-    startResize(event) {
+    const startResize = (event) => {
       const startX = event.clientX;
-      const startWidth = this.panelWidth;
+      const startWidth = panelWidth.value;
 
       const doDrag = (e) => {
         const newWidth = startWidth - (e.clientX - startX);
-        this.panelWidth = Math.min(Math.max(newWidth, 300), 800);
+        panelWidth.value = Math.min(Math.max(newWidth, 300), 800);
       };
 
       const stopDrag = () => {
@@ -464,103 +454,102 @@ export default {
 
       document.addEventListener('mousemove', doDrag);
       document.addEventListener('mouseup', stopDrag);
-    },
+    }
 
-    async selectSource(id) {
-      this.selectedSource = this.sources.find(s => s.id === id);
-      if (this.selectedSource) {
+    const selectSource = async (id) => {
+      selectedSource.value = sources.value.find(s => s.id === id);
+      if (selectedSource.value) {
         try {
-          const response = await axios.post(`${this.API_BASE_URL}/api/get-document-pages`, {
-            collection_id: parseInt(this.selectedSource.collection_id, 10),
-            source: encodeURIComponent(this.selectedSource.title)
+          const response = await axios.post(`${API_BASE_URL.value}/api/get-document-pages`, {
+            collection_id: parseInt(selectedSource.value.collection_id, 10),
+            source: encodeURIComponent(selectedSource.value.title)
           });
 
           if (response.data.success) {
             const documentInfo = response.data.documents;
             if (documentInfo && documentInfo.pages) {
-              this.pages = Array.from({ length: documentInfo.pages }, (_, i) => i + 1);
-              this.currentPage = 1;
+              pages.value = Array.from({ length: documentInfo.pages }, (_, i) => i + 1);
+              currentPage.value = 1;
               
-              await this.fetchPageContent(this.currentPage);
+              await fetchPageContent(currentPage.value);
             }
           } else {
             console.error('Failed to get document pages:', response.data.error);
-            this.error = '페이지 정보를 가져오는데 실패했습니다.';
+            error.value = '페이지 정보를 가져오는데 실패했습니다.';
           }
         } catch (err) {
           console.error('Error fetching document information:', err);
-          this.error = '문서 정보를 가져오는 중 오류가 발생했습니다.';
+          error.value = '문서 정보를 가져오는 중 오류가 발생했습니다.';
         }
       }     
-    },
+    }
 
-    getTypeColor(type) {
+    const getTypeColor = (type) => {
       const colors = {
         pdf: 'type-pdf',
         doc: 'type-doc',
         txt: 'type-txt'
       };
       return colors[type] || 'type-default';
-    },
+    }
 
-    async setCurrentPage(page) {
-      await this.fetchPageContent(page);
-      
-      this.currentPageDetail = `${this.page_content}`;
-    },
+    const setCurrentPage = async (page) => {
+      await fetchPageContent(page);
+      currentPageDetail.value = `${page_content.value}`;
+    }
 
-    async fetchPageContent(page) {
-      this.currentPage = page;
-      if (this.selectedSource) {
+    const fetchPageContent = async (page) => {
+      currentPage.value = page;
+      if (selectedSource.value) {
         try {
-          const response = await axios.post(`${this.API_BASE_URL}/api/page-content`, {
-            collection_id: parseInt(this.selectedSource.collection_id, 10),
-            source: this.selectedSource.title,
+          const response = await axios.post(`${API_BASE_URL.value}/api/page-content`, {
+            collection_id: parseInt(selectedSource.value.collection_id, 10),
+            source: selectedSource.value.title,
             page_num: page.toString(),
-            llm_name: this.llmName,
-            llm_model: this.llmModel
+            llm_name: props.llmName,
+            llm_model: props.llmModel
           });
 
           if (response.data.success) {
-            this.page_content = response.data.pages;
+            page_content.value = response.data.pages;
           } else {
             console.error('Failed to get page content:', response.data.error);
-            this.error = '페이지 내용을 가져오는데 실패했습니다.';
+            error.value = '페이지 내용을 가져오는데 실패했습니다.';
           }
         } catch (err) {
           console.error('Error fetching page content:', err);
-          this.error = '페이지 내용을 가져오는 중 오류가 발생했습니다.';
+          error.value = '페이지 내용을 가져오는 중 오류가 발생했습니다.';
         }
       }
-    },
+    }
 
-    async showSummary() {
-      if (!this.selectedSource) {
-        this.error = '선택된 문서가 없습니다.';
+    const showSummary = () => {
+      if (!selectedSource.value) {
+        error.value = '선택된 문서가 없습니다.';
         return;
       }
-      // topSummary 초기화
-      this.topSummary = '';
+      
       // 상태 초기화
-      this.isExpanded = false;
+      topSummary.value = '';
+      isExpanded.value = false;
 
+      isLoading.value = true;
+      progress.value = 0;
+      summary.value = '';
+      error.value = '';
+      currentDocument.value = '';
+      
+      startSummarizeSource();
+    }
 
-      this.isLoading = true
-      this.progress = 0
-      this.summary = ''
-      this.error = ''
-      this.currentDocument = ''
-      this.startSummarizeSource()      
-    },
-
-    async startSummarization() {
-      if (this.selectedSources.length === 0) {
-        this.error = '선택된 문서가 없습니다.';
+    const startSummarization = () => {
+      if (selectedSources.value.length === 0) {
+        error.value = '선택된 문서가 없습니다.';
         return;
       }     
 
       try {
-        const { sources } = this.selectedCollectionsSources;
+        const { sources } = props.selectedCollectionsSources;
         const documentsWithCollections = sources.map(source => ({
           collection: source.collection,
           source: source.source
@@ -571,118 +560,151 @@ export default {
         const params = new URLSearchParams({
           collections: JSON.stringify(collections),
           documents: JSON.stringify(documentsWithCollections),
-          llm_name: this.llmName,
-          llm_model: this.llmModel
+          llm_name: props.llmName,
+          llm_model: props.llmModel
         });
 
-        this.eventSource = new EventSource(`${this.API_BASE_URL}/api/summarize-sse?${params}`);
+        eventSource.value = new EventSource(`${API_BASE_URL.value}/api/summarize-sse?${params}`);
         
-        this.eventSource.onmessage = (event) => {
+        eventSource.value.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
             if (data.type === 'progress') {
-              this.progress = data.progress;
+              progress.value = data.progress;
               if (data.document) {
-                this.currentDocument = data.document;
+                currentDocument.value = data.document;
               }
             } else if (data.type === 'summary') {
-              this.summary = data.value;
-              this.isLoading = false;
-              this.closeEventSource();
+              summary.value = data.value;
+              isLoading.value = false;
+              closeEventSource();
             } else if (data.type === 'error') {
               throw new Error(data.value);
             }
           } catch (err) {
             console.error('Error processing SSE data:', err);
-            this.error = err.message || '데이터 처리 중 오류가 발생했습니다.';
-            this.closeEventSource();
+            error.value = err.message || '데이터 처리 중 오류가 발생했습니다.';
+            closeEventSource();
           }
         };
 
-        this.eventSource.onerror = (err) => {
+        eventSource.value.onerror = (err) => {
           console.error('SSE Error:', err);
-          this.error = '요약 중 오류가 발생했습니다. 서버 연결을 확인해주세요.';
-          this.isLoading = false;
-          this.closeEventSource();
+          error.value = '요약 중 오류가 발생했습니다. 서버 연결을 확인해주세요.';
+          isLoading.value = false;
+          closeEventSource();
         };
 
       } catch (err) {
         console.error('Error in startSummarization:', err);
-        this.error = err.message || '요약 중 오류가 발생했습니다.';
-        this.isLoading = false;
+        error.value = err.message || '요약 중 오류가 발생했습니다.';
+        isLoading.value = false;
       }
-    },
+    }
 
-    closeEventSource() {
-      if (this.eventSource) {
-        this.eventSource.close();
-        this.eventSource = null;
+    const closeEventSource = () => {
+      if (eventSource.value) {
+        eventSource.value.close();
+        eventSource.value = null;
       }
-    },
+    }
 
-    summarizeSource() {
-      this.startSummarizeSource();
-    },
-
-    async startSummarizeSource() {
-      if (!this.selectedSource) {
-        this.error = '선택된 문서가 없습니다.';
+    const startSummarizeSource = async () => {
+      if (!selectedSource.value) {
+        error.value = '선택된 문서가 없습니다.';
         return;
       }
 
-      if (!this.currentPage) {
-        this.error = '페이지가 선택되지 않았습니다.';
+      if (!currentPage.value) {
+        error.value = '페이지가 선택되지 않았습니다.';
         return;
       }
 
       try {
-        this.isLoading = true;
-        this.error = '';
+        isLoading.value = true;
+        error.value = '';
 
-        const response = await axios.post(`${this.API_BASE_URL}/api/summarize-page-content`, {
-          collection_id: parseInt(this.selectedSource.collection_id, 10),
-          source: this.selectedSource.title,
-          page_num: this.currentPage.toString(),
-          llm_name: this.llmName,
-          llm_model: this.llmModel
+        const response = await axios.post(`${API_BASE_URL.value}/api/summarize-page-content`, {
+          collection_id: parseInt(selectedSource.value.collection_id, 10),
+          source: selectedSource.value.title,
+          page_num: currentPage.value.toString(),
+          llm_name: props.llmName,
+          llm_model: props.llmModel
         });
 
         if (response.data.success) {
-          this.topSummary = response.data.pages;
+          topSummary.value = response.data.pages;
         } else {          
-          this.error = '페이지 내용을 가져오는데 실패했습니다.';
+          error.value = '페이지 내용을 가져오는데 실패했습니다.';
         }
       } catch (err) {        
-        this.error = '요약 중 오류가 발생했습니다.';
+        error.value = '요약 중 오류가 발생했습니다.';
       } finally {
-        this.isLoading = false;
+        isLoading.value = false;
       }
     }
-  },
 
-  watch: {
-    selectedCollectionsSources: {
-      handler(newVal) {
-        console.log('Selected sources changed:', newVal);
-      },
-      deep: true
-    },
-    topSummary() {
-      this.$nextTick(() => {
-        this.checkOverflow();
-      });
-    }
-  },
+    // Lifecycle hooks
+    onMounted(() => {
+      window.addEventListener('resize', checkOverflow);
+      checkOverflow();
+    })
 
-  mounted() {
-    window.addEventListener('resize', this.checkOverflow);
-    this.checkOverflow();
-  },
+    onUnmounted(() => {
+      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('resize', checkOverflow);
+      closeEventSource();
+    })
 
-  beforeUnmount() {
-    window.removeEventListener('resize', this.handleResize);
-    window.removeEventListener('resize', this.checkOverflow);
-    this.closeEventSource();
+
+    return {
+      // Reactive state and computeds
+      containerStyle,
+      centerPanelStyle,
+      selectedSource,
+      currentPage,
+      isLoading,
+      error,
+      page_content,
+      pages,
+      topSummary,
+      sources,
+      sourcesByCollection,
+      selectedSources,
+      renderedPageContent,
+      totalPages,
+      displayedPages,
+      
+      // UI State
+      isPanelCollapsed,
+      windowWidth,
+      sidebarWidth,
+      panelWidth,
+      isExpanded,
+      hasOverflow,
+      progress,
+      currentDocument,
+      
+      // Methods
+      selectSource,
+      fetchPageContent,
+      setCurrentPage,
+      getTypeColor,
+      toggleExpand,
+      checkOverflow,
+      handleResize,
+      toggleAllSources,
+      toggleSource,
+      togglePanel,
+      startResize,
+      showSummary,
+      startSummarization,
+      startSummarizeSource,
+      closeEventSource,
+      
+      // Utility functions
+      safeMarkdownParse
+    };
   }
 }
 </script>

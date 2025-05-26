@@ -42,61 +42,222 @@
 </template>
 
 <script>
+import { ref, computed, onMounted } from 'vue';
 import axios from 'axios';
-
-const API_BASE_URL = 'http://localhost:5001'; // 실제 서버 주소로 변경 필요
+import { useStore } from 'vuex';
 
 export default {
   name: 'ViewDB',
-  data() {
-    return {
-      selectedCollection: '',
-      collections: [],
-      documents: [],
-      showModal: false
-    }
-  },
-  mounted() {
-    this.fetchCollections();
-  },
-  methods: {
-    async fetchCollections() {
+  setup() {
+    const store = useStore();
+    const apiBaseUrl = computed(() => store.getters.getApiBaseUrl);
+    const isLoading = ref(false);
+    const error = ref(null);
+    
+    // 인증 관련 상태
+    const isAuthenticated = ref(false);
+    const userId = ref(null);
+    const username = ref('');
+    const isAdmin = ref(false);
+    
+    // 데이터 관련 상태
+    const selectedCollection = ref('');
+    const collections = ref([]);
+    const documents = ref([]);
+    const showModal = ref(false);
+    
+    // 인증 확인 함수
+    const checkAuth = async () => {
       try {
-        const response = await axios.get(`${API_BASE_URL}/api/list-collections`);
-        if (response.data.success) {
-          this.collections = response.data.collections;
-          if (this.collections.length > 0) {
-            this.selectedCollection = this.collections[0];
-          }
+        const token = sessionStorage.getItem('token');
+        
+        if (!token) {
+          console.log('Token not found, resetting auth state');
+          resetAuth();
+          return;
+        }
+
+        console.log('Checking authentication with token');
+        const response = await axios.get(`${apiBaseUrl.value}/api/auth/check-auth`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          },
+          withCredentials: true
+        });
+        
+        console.log('Authentication check response:', response.data);
+        
+        if (response.data.authenticated) {
+          console.log('Authentication successful');
+          isAuthenticated.value = true;
+          username.value = response.data.username;
+          userId.value = response.data.user_id;
+          isAdmin.value = response.data.is_admin || false;
         } else {
-          console.error('컬렉션 목록 가져오기 실패:', response.data.message);
+          console.warn('Server responded but authentication failed');
+          resetAuth();
         }
       } catch (error) {
-        console.error('컬렉션 목록을 가져오는 중 오류 발생:', error);
-      }
-    },
-    async viewDb() {
-      if (this.selectedCollection) {
-        try {
-          const response = await axios.get(`${API_BASE_URL}/api/view-collection`, {
-            params: { collection_name: this.selectedCollection }
-          });
-          if (response.data.success) {
-            this.documents = response.data.documents;
-            this.showModal = true;
-          } else {
-            console.error('컬렉션 내용 가져오기 실패:', response.data.message);
-            alert('컬렉션 내용을 가져오는데 실패했습니다.');
-          }
-        } catch (error) {
-          console.error('컬렉션 내용을 가져오는 중 오류 발생:', error);
-          alert('컬렉션 내용을 가져오는 중 오류가 발생했습니다.');
+        console.error('Authentication check failed:', error);
+        
+        // 상세 에러 정보 로깅
+        if (error.response) {
+          console.error('Error response data:', error.response.data);
+          console.error('Error response status:', error.response.status);
+        } else if (error.request) {
+          console.error('No response received:', error.request);
+        } else {
+          console.error('Error creating request:', error.message);
         }
+        
+        resetAuth();
       }
-    },
-    closeModal() {
-      this.showModal = false;
-    }
+    };
+    
+    // 인증 정보 초기화
+    const resetAuth = () => {
+      console.log('Resetting authentication state');
+      isAuthenticated.value = false;
+      username.value = '';
+      userId.value = null;
+      isAdmin.value = false;
+    };
+    
+    const fetchCollections = async () => {
+      // 로딩 상태 초기화
+      isLoading.value = true;
+      error.value = null;
+      collections.value = [];
+      
+      console.log('컬렉션 목록 조회 시작');
+      
+      try {
+        // 인증이 필요한 경우 확인
+        let requestConfig = {};
+        if (isAuthenticated.value) {
+          requestConfig = {
+            headers: {
+              'Authorization': `Bearer ${sessionStorage.getItem('token')}`
+            }
+          };
+        }
+        
+        // 컬렉션 목록 가져오기
+        const response = await axios.get(`${apiBaseUrl.value}/api/list-collections`, requestConfig);
+        
+        console.log('컬렉션 조회 응답:', response.data);
+        
+        if (response.data.success) {
+          collections.value = response.data.collections;
+          
+          // 컬렉션이 있으면 첫 번째 항목 선택
+          if (collections.value.length > 0) {
+            selectedCollection.value = collections.value[0];
+            console.log(`컬렉션 '${selectedCollection.value}' 자동 선택됨`);
+          } else {
+            console.warn('조회된 컬렉션이 없습니다.');
+          }
+          
+          console.log(`총 ${collections.value.length}개의 컬렉션 조회 완료`);
+        } else {
+          console.error('컬렉션 목록 가져오기 실패:', response.data.message);
+          error.value = response.data.message || '컬렉션을 가져오는 데 실패했습니다.';
+        }
+      } catch (err) {
+        console.error('컬렉션 목록 조회 중 오류 발생:', err.message);
+        
+        if (err.response) {
+          console.error('Error response:', {
+            data: err.response.data,
+            status: err.response.status
+          });
+          
+          // HTTP 상태 코드에 따른 처리
+          if (err.response.status === 401) {
+            error.value = '인증 토큰이 유효하지 않습니다. 다시 로그인해주세요.';
+          } else if (err.response.status === 403) {
+            error.value = '컬렉션에 접근할 권한이 없습니다.';
+          } else {
+            error.value = err.response.data.message || '서버와 통신 중 오류가 발생했습니다.';
+          }
+        } else if (err.request) {
+          error.value = '서버에 연결할 수 없습니다. 네트워크 연결을 확인해주세요.';
+        } else {
+          error.value = err.message || '알 수 없는 오류가 발생했습니다.';
+        }
+      } finally {
+        // 로딩 상태 종료
+        isLoading.value = false;
+      }
+    };
+    
+    const viewDb = async () => {
+      if (!selectedCollection.value) {
+        alert('컬렉션을 선택해주세요.');
+        return;
+      }
+      
+      isLoading.value = true;
+      
+      try {
+        console.log(`컬렉션 '${selectedCollection.value}' 내용 조회 시작`);
+        
+        const response = await axios.get(`${apiBaseUrl.value}/api/view-collection`, {
+          params: { collection_name: selectedCollection.value },
+          headers: isAuthenticated.value ? {
+            'Authorization': `Bearer ${sessionStorage.getItem('token')}`
+          } : undefined
+        });
+        
+        if (response.data.success) {
+          documents.value = response.data.documents;
+          showModal.value = true;
+          console.log(`총 ${documents.value.length}개의 문서 조회 완료`);
+        } else {
+          console.error('컬렉션 내용 가져오기 실패:', response.data.message);
+          alert('컬렉션 내용을 가져오는데 실패했습니다.');
+        }
+      } catch (error) {
+        console.error('컬렉션 내용을 가져오는 중 오류 발생:', error);
+        
+        let errorMessage = '컬렉션 내용을 가져오는 중 오류가 발생했습니다.';
+        if (error.response && error.response.data && error.response.data.message) {
+          errorMessage = `오류: ${error.response.data.message}`;
+        }
+        
+        alert(errorMessage);
+      } finally {
+        isLoading.value = false;
+      }
+    };
+    
+    const closeModal = () => {
+      showModal.value = false;
+    };
+    
+    // 컴포넌트 마운트 시 실행
+    onMounted(async () => {
+      console.log('ViewDB component mounted');
+      await checkAuth();
+      await fetchCollections();
+    });
+    
+    return {
+      apiBaseUrl,
+      isLoading,
+      error,
+      isAuthenticated,
+      userId,
+      username,
+      selectedCollection,
+      collections,
+      documents,
+      showModal,
+      checkAuth,
+      fetchCollections,
+      viewDb,
+      closeModal
+    };
   }
 }
 </script>

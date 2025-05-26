@@ -96,8 +96,12 @@ import SearchDB from './SearchDB.vue';
 import ViewDB from './ViewDB.vue';
 import FileUploadDialog from './FileUploadDialog.vue';
 import axios from 'axios';
+import {computed } from 'vue';
+import { useStore} from 'vuex';
 
-const API_BASE_URL = 'http://localhost:5001';
+
+
+
 
 export default {
   name: 'DbView',
@@ -107,6 +111,14 @@ export default {
     SearchDB,
     ViewDB,
     FileUploadDialog
+  },
+  setup() {
+    const store = useStore();
+    const apiBaseUrl = computed(() => store.getters.getApiBaseUrl);
+    
+    return {
+      apiBaseUrl
+    };
   },
   data() {
     return {
@@ -160,7 +172,7 @@ export default {
     },
     async fetchCollectionFiles() {
       try {
-        const response = await axios.get(`${API_BASE_URL}/api/collection_files/${this.currentCollection}`);
+        const response = await axios.get(`${this.apiBaseUrl.value}/api/collection_files/${this.currentCollection}`);
         if (response.data.success) {
           this.files = response.data.files;
         }

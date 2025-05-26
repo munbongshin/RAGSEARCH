@@ -47,86 +47,260 @@
 </template>
 
 <script>
+import { ref, computed, onMounted } from 'vue';
+import { useStore } from 'vuex';
 import axios from 'axios';
-
-const API_BASE_URL = 'http://localhost:5001'; // 실제 서버 주소로 변경 필요
 
 export default {
   name: 'SearchDB',
-  data() {
-    return {
-      selectedCollection: '',
-      searchQuery: '',
-      collections: [],
-      searchResults: [],
-      showModal: false
-    }
-  },
-  computed: {
-    collectionOptions() {
-      if (this.collections.length > 1) {
-        return this.collections.map(collection => ({
+  setup() {
+    const store = useStore();
+    const apiBaseUrl = computed(() => store.getters.getApiBaseUrl);
+    const isLoading = ref(false);
+    const error = ref(null);
+    
+    // 인증 관련 상태
+    const isAuthenticated = ref(false);
+    const userId = ref(null);
+    const username = ref('');
+    const isAdmin = ref(false);
+    
+    // 데이터 관련 상태
+    const selectedCollection = ref('');
+    const searchQuery = ref('');
+    const collections = ref([]);
+    const searchResults = ref([]);
+    const showModal = ref(false);
+    
+    // 계산된 속성
+    const collectionOptions = computed(() => {
+      if (collections.value.length > 1) {
+        return collections.value.map(collection => ({
           value: collection,
           text: collection
         }));
       } else {
         return [
           { value: '', text: 'Collection을 선택하세요' },
-          ...this.collections.map(collection => ({
+          ...collections.value.map(collection => ({
             value: collection,
             text: collection
           }))
         ];
       }
-    }
-  },
-  mounted() {
-    this.fetchCollections();
-  },
-  methods: {
-    async fetchCollections() {
+    });
+    
+    // 인증 확인 함수
+    const checkAuth = async () => {
       try {
-        const response = await axios.get(`${API_BASE_URL}/api/list-collections`);
-        if (response.data.success) {
-          this.collections = response.data.collections;
-          if (this.collections.length > 0) {
-            this.selectedCollection = this.collections[0];
-          }
+        const token = sessionStorage.getItem('token');
+        
+        if (!token) {
+          console.log('Token not found, resetting auth state');
+          resetAuth();
+          return;
+        }
+
+        console.log('Checking authentication with token');
+        const response = await axios.get(`${apiBaseUrl.value}/api/auth/check-auth`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          },
+          withCredentials: true
+        });
+        
+        console.log('Authentication check response:', response.data);
+        
+        if (response.data.authenticated) {
+          console.log('Authentication successful');
+          isAuthenticated.value = true;
+          username.value = response.data.username;
+          userId.value = response.data.user_id;
+          isAdmin.value = response.data.is_admin || false;
         } else {
-          console.error('컬렉션 목록 가져오기 실패:', response.data.message);
+          console.warn('Server responded but authentication failed');
+          resetAuth();
         }
       } catch (error) {
-        console.error('컬렉션 목록을 가져오는 중 오류 발생:', error);
-      }
-    },
-    async searchDb() {
-      console.log('searchDb 메서드가 호출되었습니다.');
-      if (this.selectedCollection && this.searchQuery.trim()) {
-        try {
-          const response = await axios.get(`${API_BASE_URL}/api/search-documents`, {
-            params: {
-              collection_name: this.selectedCollection,
-              source_search: this.searchQuery
-            }
-          });
-          if (response.data.success) {
-            this.searchResults = response.data.results;
-            this.showModal = true;
-          } else {
-            console.error('검색 실패:', response.data.message);
-            alert('검색 중 오류가 발생했습니다.');
-          }
-        } catch (error) {
-          console.error('검색 중 오류 발생:', error.response || error);
-          alert('검색 중 오류가 발생했습니다.');
+        console.error('Authentication check failed:', error);
+        
+        // 상세 에러 정보 로깅
+        if (error.response) {
+          console.error('Error response data:', error.response.data);
+          console.error('Error response status:', error.response.status);
+        } else if (error.request) {
+          console.error('No response received:', error.request);
+        } else {
+          console.error('Error creating request:', error.message);
         }
-      } else {
-        alert('컬렉션과 검색어를 모두 입력해주세요.');
+        
+        resetAuth();
       }
-    },
-    closeModal() {
-      this.showModal = false;
-    }
+    };
+    
+    // 인증 정보 초기화
+    const resetAuth = () => {
+      console.log('Resetting authentication state');
+      isAuthenticated.value = false;
+      username.value = '';
+      userId.value = null;
+      isAdmin.value = false;
+    };
+    
+    const fetchCollections = async () => {
+      // 로딩 상태 초기화
+      isLoading.value = true;
+      error.value = null;
+      collections.value = [];
+      
+      console.log('컬렉션 목록 조회 시작');
+      
+      try {
+        // 인증이 필요한 경우 확인
+        let requestConfig = {};
+        if (isAuthenticated.value) {
+          requestConfig = {
+            headers: {
+              'Authorization': `Bearer ${sessionStorage.getItem('token')}`
+            }
+          };
+        }
+        
+        // 컬렉션 목록 가져오기
+        const response = await axios.get(`${apiBaseUrl.value}/api/list-collections`, requestConfig);
+        
+        console.log('컬렉션 조회 응답:', response.data);
+        
+        if (response.data.success) {
+          collections.value = response.data.collections;
+          
+          // 컬렉션이 있으면 첫 번째 항목 선택
+          if (collections.value.length > 0) {
+            selectedCollection.value = collections.value[0];
+            console.log(`컬렉션 '${selectedCollection.value}' 자동 선택됨`);
+          } else {
+            console.warn('조회된 컬렉션이 없습니다.');
+          }
+          
+          console.log(`총 ${collections.value.length}개의 컬렉션 조회 완료`);
+        } else {
+          console.error('컬렉션 목록 가져오기 실패:', response.data.message);
+          error.value = response.data.message || '컬렉션을 가져오는 데 실패했습니다.';
+        }
+      } catch (err) {
+        console.error('컬렉션 목록 조회 중 오류 발생:', err.message);
+        
+        if (err.response) {
+          console.error('Error response:', {
+            data: err.response.data,
+            status: err.response.status
+          });
+          
+          // HTTP 상태 코드에 따른 처리
+          if (err.response.status === 401) {
+            error.value = '인증 토큰이 유효하지 않습니다. 다시 로그인해주세요.';
+          } else if (err.response.status === 403) {
+            error.value = '컬렉션에 접근할 권한이 없습니다.';
+          } else {
+            error.value = err.response.data.message || '서버와 통신 중 오류가 발생했습니다.';
+          }
+        } else if (err.request) {
+          error.value = '서버에 연결할 수 없습니다. 네트워크 연결을 확인해주세요.';
+        } else {
+          error.value = err.message || '알 수 없는 오류가 발생했습니다.';
+        }
+      } finally {
+        // 로딩 상태 종료
+        isLoading.value = false;
+      }
+    };
+    
+    const searchDb = async () => {
+      console.log('searchDb 메서드가 호출되었습니다.');
+      
+      if (!selectedCollection.value || !searchQuery.value.trim()) {
+        alert('컬렉션과 검색어를 모두 입력해주세요.');
+        return;
+      }
+      
+      isLoading.value = true;
+      searchResults.value = [];
+      
+      try {
+        console.log(`컬렉션 '${selectedCollection.value}'에서 '${searchQuery.value}' 검색 시작`);
+        
+        let requestConfig = {
+          params: {
+            collection_name: selectedCollection.value,
+            source_search: searchQuery.value
+          }
+        };
+        
+        // 인증이 필요한 경우 토큰 추가
+        if (isAuthenticated.value) {
+          requestConfig.headers = {
+            'Authorization': `Bearer ${sessionStorage.getItem('token')}`
+          };
+        }
+        
+        const response = await axios.get(`${apiBaseUrl.value}/api/search-documents`, requestConfig);
+        
+        if (response.data.success) {
+          // 백엔드 응답 필드를 프론트엔드에서 사용하는 필드로 매핑
+          searchResults.value = response.data.results.map(item => ({
+            page_content: item.content || '',
+            metadata: item.metadata || {},
+            score: item.score || 0
+          }));
+          showModal.value = true;
+          console.log(`검색 결과: ${searchResults.value.length}개 항목 찾음`);
+        } else {
+          console.error('검색 실패:', response.data.message);
+          alert('검색 중 오류가 발생했습니다: ' + (response.data.message || '알 수 없는 오류'));
+        }
+      } catch (error) {
+        console.error('검색 중 오류 발생:', error.response || error);
+        
+        let errorMessage = '검색 중 오류가 발생했습니다.';
+        if (error.response && error.response.data && error.response.data.message) {
+          errorMessage += ` (${error.response.data.message})`;
+        }
+        
+        alert(errorMessage);
+      } finally {
+        isLoading.value = false;
+      }
+    };
+    
+    const closeModal = () => {
+      showModal.value = false;
+    };
+    
+    // 컴포넌트 마운트 시 실행
+    onMounted(async () => {
+      console.log('SearchDB component mounted');
+      await checkAuth();
+      await fetchCollections();
+    });
+    
+    return {
+      apiBaseUrl,
+      isLoading,
+      error,
+      isAuthenticated,
+      userId,
+      username,
+      selectedCollection,
+      searchQuery,
+      collections,
+      searchResults,
+      showModal,
+      collectionOptions,
+      checkAuth,
+      fetchCollections,
+      searchDb,
+      closeModal
+    };
   }
 }
 </script>

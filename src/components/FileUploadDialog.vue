@@ -70,10 +70,10 @@
 </template>
 
 <script>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted, computed } from 'vue';
 import axios from 'axios';
+import { useStore } from 'vuex';
 
-const API_BASE_URL = 'http://localhost:5001';
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 
 export default {
@@ -88,6 +88,7 @@ export default {
       default: ''
     }
   },
+
   emits: ['close', 'embedding-completed', 'files-dropped'],
   setup(props, { emit }) {
     const dropZoneRef = ref(null);
@@ -100,9 +101,12 @@ export default {
     const totalFiles = ref(0);
     const errorMessage = ref('');
     const isUploading = ref(false);
-    const cancelTokenSource = ref(null);
+    const cancelTokenSources = ref([]);
     const showAlert = ref(false);
     const alertMessage = ref('');
+ 
+    const store = useStore();
+    const apiBaseUrl = computed(() => store.getters.getApiBaseUrl);
 
     const formatFileSize = (bytes) => {
       if (bytes < 1024) return bytes + ' B';
@@ -163,12 +167,11 @@ export default {
     };
 
     const closeAlert = () => {
-      // 알림창만 닫기
       showAlert.value = false;
       
-      // 성공 시에는 상태 리셋
       if (alertMessage.value.includes('성공적으로 완료')) {
         resetState();
+        emit('close');
       }
     };
 
@@ -181,6 +184,7 @@ export default {
       completedFiles.value = 0;
       totalFiles.value = selectedFiles.value.length;
       errorMessage.value = '';
+      cancelTokenSources.value = []; // Reset cancel token sources
       let hasError = false;
 
       // 전체 파일 크기 체크
@@ -195,19 +199,21 @@ export default {
       try {
         for (const file of selectedFiles.value) {
           try {
-            cancelTokenSource.value = axios.CancelToken.source();
+            const cancelTokenSource = axios.CancelToken.source();
+            cancelTokenSources.value.push(cancelTokenSource);
+            
             const formData = new FormData();
             formData.append('file', file);
             formData.append('collection', props.selectedCollection);
 
-            const response = await axios.post(`${API_BASE_URL}/api/upload_and_embed`, formData, {
+            const response = await axios.post(`${apiBaseUrl.value}/api/upload_and_embed`, formData, {
               headers: {
                 'Content-Type': 'multipart/form-data'
               },
               timeout: 600000, // 10분
               maxContentLength: MAX_FILE_SIZE,
               maxBodyLength: MAX_FILE_SIZE,
-              cancelToken: cancelTokenSource.value.token,
+              cancelToken: cancelTokenSource.token,
               onUploadProgress: (progressEvent) => {
                 if (progressEvent.lengthComputable) {
                   const percentCompleted = Math.round(
@@ -248,14 +254,12 @@ export default {
       } finally {
         isUploading.value = false;
         isEmbedding.value = false;
-        cancelTokenSource.value = null;
       }
 
       if (!hasError) {
         emit('embedding-completed', props.selectedCollection);
         alertMessage.value = '임베딩이 성공적으로 완료되었습니다.';
         showAlert.value = true;
-        // 여기서 emit('close')를 제거
       } else {
         alertMessage.value = '임베딩 중 에러가 발생했습니다. 에러 메시지를 확인하세요!';
         showAlert.value = true;
@@ -269,10 +273,12 @@ export default {
     };
 
     const cancelUpload = () => {
-      if (cancelTokenSource.value) {
-        cancelTokenSource.value.cancel('Upload cancelled by user');
-        cancelTokenSource.value = null;
-      }
+      cancelTokenSources.value.forEach(source => {
+        if (source) {
+          source.cancel('Upload cancelled by user');
+        }
+      });
+      cancelTokenSources.value = [];
     };
 
     const resetState = () => {
@@ -285,9 +291,18 @@ export default {
       errorMessage.value = '';
       showAlert.value = false;
       alertMessage.value = '';
+      
+      // Safe way to reset file input
       if (fileInputRef.value) {
-        fileInputRef.value.value = '';
+        try {
+          fileInputRef.value.value = '';
+        } catch (e) {
+          console.warn('Could not reset file input', e);
+        }
       }
+      
+      // Cancel any ongoing uploads
+      cancelUpload();
     };
 
     const closeDialog = () => {
@@ -299,7 +314,6 @@ export default {
       resetState();
       emit('close');
     };
-
 
     const handleKeyDown = (e) => {
       if (e.key === 'Escape' && props.show) {

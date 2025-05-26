@@ -192,7 +192,8 @@ import SummarizeSource from './SummarizeSource.vue'
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 
-const API_BASE_URL = 'http://localhost:5001'
+
+
 
 export default defineComponent({
  name: 'ChatView',
@@ -206,13 +207,15 @@ export default defineComponent({
     'openModal',
     'closeModal',
     'update-selected-mode'
-  ], 
+  ],
+
  setup(props, { emit }) {
   const store = useStore()
   const showAlert = ref(false);
   const alertMessage = ref('');
   const alertType = ref('alert'); // 'alert' 또는 'confirm'
   const alertCallback = ref(null);
+  const apiBaseUrl = computed(() => store.getters.getApiBaseUrl);
 
   // state에서 alert 관련 속성 제거
   const state = reactive({
@@ -320,7 +323,7 @@ export default defineComponent({
        console.log('Fetching collections for username:', username)
 
        // 1. user_id 조회
-       const userResponse = await axios.get('/api/user/id', {
+       const userResponse = await axios.get(`${apiBaseUrl.value}/api/user/id`, {
          params: { username }
        })
 
@@ -332,7 +335,7 @@ export default defineComponent({
        console.log('User ID:', userId)
 
        // 2. 컬렉션과 권한 정보를 가져오기
-       const response = await axios.get('/api/collections', {
+       const response = await axios.get(`${apiBaseUrl.value}/api/collections`, {
          params: { 
            username,
            user_id: userId
@@ -414,7 +417,7 @@ export default defineComponent({
 
        console.log('Fetching documents with params:', params.toString());
 
-       const response = await axios.get(`${API_BASE_URL}/api/get-all-documents-source`, {
+       const response = await axios.get(`${apiBaseUrl.value}/api/get-all-documents-source`, {
          params: params,
          paramsSerializer: params => {
            return params.toString();
@@ -634,7 +637,7 @@ export default defineComponent({
           };
         });
 
-        const response = await axios.post(`${API_BASE_URL}/api/delete-sources`, {
+        const response = await axios.post(`${apiBaseUrl.value}/api/delete-sources`, {
           collections: state.selectedCollections,
           documents: documentsWithCollections
         });
@@ -757,6 +760,7 @@ export default defineComponent({
     alertType,
     handleConfirm,
     handleCancel,
+    apiBaseUrl,
     showConfirmAlert
   }
 }});
